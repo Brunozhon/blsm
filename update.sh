@@ -395,12 +395,14 @@ fi
 log "Backing up configuration and application data to $backup_dir"
 install -d -m 0700 -o root -g root "$backup_dir"
 rsync -aHAX --numeric-ids "$CONFIG_DIR/" "$backup_dir/config/"
-rsync -aHAX --numeric-ids "${link_options[@]}" "$DATA_DIR/" "$backup_dir/data/"
+rsync -aHAX --numeric-ids --exclude=/backups/ \
+  "${link_options[@]}" "$DATA_DIR/" "$backup_dir/data/"
 cat > "$backup_dir/manifest.txt" <<EOF
 created_utc=$backup_id
 previous_release=$current_ref
 new_release=$release_ref
 data_directory=$DATA_DIR
+managed_backups=$DATA_DIR/backups (preserved in place; excluded from update snapshot)
 EOF
 chmod 0600 "$backup_dir/manifest.txt"
 

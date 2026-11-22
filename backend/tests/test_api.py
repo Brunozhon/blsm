@@ -83,7 +83,7 @@ async def test_serves_configured_frontend_and_spa_fallback(tmp_path: Path) -> No
     assert Path(fallback_response.path) == frontend_dir / "index.html"
 
 
-async def test_first_run_auth_and_server_creation(tmp_path: Path) -> None:
+async def test_first_run_auth_and_server_creation(tmp_path: Path, monkeypatch: Any) -> None:
     settings = Settings(
         data_dir=tmp_path,
         host="127.0.0.1",
@@ -105,6 +105,22 @@ async def test_first_run_auth_and_server_creation(tmp_path: Path) -> None:
             {"password": "a-secure-test-password"},
         )
         assert setup_status == 200
+
+        async def available_versions() -> list[str]:
+            return ["26.3", "1.21.11"]
+
+        monkeypatch.setattr(
+            app.state.adapters["minecraft-fabric"],
+            "available_versions",
+            available_versions,
+        )
+        assert await request_json(
+            app,
+            "GET",
+            "/api/adapters/minecraft-fabric/versions",
+            headers={"Authorization": f"Bearer {setup['token']}"},
+        ) == (200, ["26.3", "1.21.11"])
+
         status, body = await request_json(
             app,
             "POST",
@@ -122,7 +138,41 @@ async def test_first_run_auth_and_server_creation(tmp_path: Path) -> None:
         assert "mods" in body["capabilities"]
         assert "settings" in body["capabilities"]
         assert "game_rules" in body["capabilities"]
+        assert "backups" in body["capabilities"]
         assert "rcon_password" not in body["config"]
+
+        backups_status, backups = await request_json(
+            app,
+            "GET",
+            f"/api/servers/{body['id']}/backups",
+            headers={"Authorization": f"Bearer {setup['token']}"},
+        )
+        assert backups_status == 200
+        assert backups["backups"] == []
+        assert backups["policy"]["retention_count"] == 7
+        policy_status, policy = await request_json(
+            app,
+            "PUT",
+            f"/api/servers/{body['id']}/backup-policy",
+            {
+                "enabled": True,
+                "interval_hours": 12,
+                "retention_count": 5,
+                "max_total_mb": 20480,
+            },
+            {"Authorization": f"Bearer {setup['token']}"},
+        )
+        assert policy_status == 200
+        assert policy["enabled"] is True
+        assert policy["interval_hours"] == 12
+        backup_status, backup_error = await request_json(
+            app,
+            "POST",
+            f"/api/servers/{body['id']}/backups",
+            headers={"Authorization": f"Bearer {setup['token']}"},
+        )
+        assert backup_status == 409
+        assert "fully stopped" in backup_error["detail"]
 
         server_path = next((tmp_path / "servers").iterdir())
         (server_path / "server.properties").write_text(

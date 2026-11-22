@@ -1,5 +1,6 @@
 import {
   Activity,
+  Archive,
   Box,
   Boxes,
   CirclePlus,
@@ -7,6 +8,7 @@ import {
   Crown,
   Download,
   Gauge,
+  HardDrive,
   LogOut,
   MemoryStick,
   Menu,
@@ -15,6 +17,7 @@ import {
   Play,
   Plus,
   RefreshCw,
+  RotateCcw,
   Save,
   Search,
   ServerIcon,
@@ -33,9 +36,11 @@ import {
 } from 'lucide-react'
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api, session } from './api'
-import type { GameRule, InstalledMod, ModResult, PlayerState, Server, ServerSetting, Stats } from './types'
+import type { BackupPolicy, BackupRecord, BackupState, GameRule, InstalledMod, ModResult, PlayerState, Server, ServerSetting, Stats } from './types'
 
-type View = 'overview' | 'console' | 'mods' | 'players' | 'game-rules' | 'settings'
+type View = 'overview' | 'console' | 'mods' | 'players' | 'backups' | 'game-rules' | 'settings'
+
+const BUNDLED_MINECRAFT_VERSIONS = ['26.3', '1.21.11', '1.21.10', '1.21.9', '1.21.8', '1.21.7', '1.21.6', '1.21.5', '1.21.4']
 
 function matchesSearch(query: string, fields: Array<string | number | boolean | null | undefined>) {
   const terms = query.toLocaleLowerCase().match(/[a-z0-9]+/g) ?? []
@@ -247,6 +252,9 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
               {selected.capabilities.some((capability) => ['players', 'whitelist', 'operators'].includes(capability)) && (
                 <button className={`nav-item ${view === 'players' ? 'nav-active' : ''}`} onClick={() => { setView('players'); setSidebarOpen(false) }}><Users size={17} /> Players</button>
               )}
+              {selected.capabilities.includes('backups') && (
+                <button className={`nav-item ${view === 'backups' ? 'nav-active' : ''}`} onClick={() => { setView('backups'); setSidebarOpen(false) }}><Archive size={17} /> Backups</button>
+              )}
               {selected.capabilities.includes('game_rules') && (
                 <button className={`nav-item ${view === 'game-rules' ? 'nav-active' : ''}`} onClick={() => { setView('game-rules'); setSidebarOpen(false) }}><SlidersHorizontal size={17} /> Game Rules</button>
               )}
@@ -300,6 +308,8 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
             <ModsView server={selected} setError={setError} />
           ) : view === 'players' ? (
             <PlayersView server={selected} setError={setError} />
+          ) : view === 'backups' ? (
+            <BackupsView server={selected} setError={setError} />
           ) : view === 'game-rules' ? (
             <GameRulesView server={selected} setError={setError} />
           ) : view === 'settings' ? (
@@ -513,6 +523,152 @@ function PlayerPanel({ title, description, icon, empty, players, online = [], ch
       <div className="panel-header"><div><h3 className="panel-title flex items-center gap-2">{icon}{title}</h3><p className="panel-description">{description}</p></div><span className="text-xs text-zinc-600">{players.length}</span></div>
       {players.length === 0 ? <p className="px-5 py-8 text-center text-sm text-zinc-600">{empty}</p> : <div className="divide-y divide-zinc-800/70">{players.map((player) => <div key={player.toLowerCase()} className="flex items-center gap-3 px-4 py-3"><div className="grid size-8 place-items-center rounded-lg border border-zinc-800 bg-zinc-900 text-xs font-medium text-zinc-400">{player.slice(0, 1).toUpperCase()}</div><div className="min-w-0 flex-1"><p className="truncate text-sm text-zinc-200">{player}</p>{onlineNames.has(player.toLowerCase()) && <p className="mt-0.5 flex items-center gap-1.5 text-[11px] text-emerald-400"><span className="status-dot bg-emerald-400" />Online</p>}</div>{children(player)}</div>)}</div>}
     </section>
+  )
+}
+
+function BackupsView({ server, setError }: { server: Server; setError: (error: string) => void }) {
+  const [state, setState] = useState<BackupState | null>(null)
+  const [policy, setPolicy] = useState<BackupPolicy | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [busy, setBusy] = useState('')
+  const [notice, setNotice] = useState('')
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    try {
+      const document = await api.backups(server.id)
+      setState(document)
+      setPolicy(document.policy)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Could not load backups')
+    } finally {
+      setLoading(false)
+    }
+  }, [server.id, setError])
+
+  useEffect(() => { void load() }, [load])
+
+  async function createBackup() {
+    setBusy('create'); setNotice('')
+    try {
+      await api.createBackup(server.id)
+      setNotice('Backup completed successfully.')
+      await load()
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Backup failed')
+    } finally {
+      setBusy('')
+    }
+  }
+
+  async function savePolicy() {
+    if (!policy) return
+    setBusy('policy'); setNotice('')
+    try {
+      const updated = await api.updateBackupPolicy(server.id, policy)
+      setPolicy(updated)
+      setState((current) => current ? { ...current, policy: updated } : current)
+      setNotice(updated.enabled ? 'Scheduled backups enabled.' : 'Scheduled backups disabled.')
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Could not save backup schedule')
+    } finally {
+      setBusy('')
+    }
+  }
+
+  async function downloadBackup(record: BackupRecord) {
+    setBusy(`download:${record.id}`)
+    try {
+      const blob = await api.downloadBackup(server.id, record.id)
+      const url = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = record.filename
+      anchor.click()
+      URL.revokeObjectURL(url)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Download failed')
+    } finally {
+      setBusy('')
+    }
+  }
+
+  async function restoreBackup(record: BackupRecord) {
+    if (!window.confirm(`Restore ${record.filename}? BLSM will first create a safety backup of the current server. The server must remain stopped.`)) return
+    setBusy(`restore:${record.id}`); setNotice('')
+    try {
+      const restored = await api.restoreBackup(server.id, record.id)
+      setNotice(`Restore completed. Safety backup ${restored.safety_backup.filename} was retained.${restored.cleanup_pending ? ' Old-file cleanup will be retried when BLSM restarts.' : ''}`)
+      await load()
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Restore failed')
+    } finally {
+      setBusy('')
+    }
+  }
+
+  async function deleteBackup(record: BackupRecord) {
+    if (!window.confirm(`Permanently delete ${record.filename}?`)) return
+    setBusy(`delete:${record.id}`); setNotice('')
+    try {
+      await api.deleteBackup(server.id, record.id)
+      setNotice('Backup deleted.')
+      await load()
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Could not delete backup')
+    } finally {
+      setBusy('')
+    }
+  }
+
+  const records = state?.backups ?? []
+  const completed = records.filter((record) => record.status === 'complete')
+  const totalBytes = completed.reduce((total, record) => total + record.size_bytes, 0)
+  const stopped = server.status === 'stopped'
+  const operation = state?.operation
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+        <div><h2 className="page-title">Backups</h2><p className="page-subtitle">Versioned server archives, retention, and safe restoration.</p></div>
+        <div className="flex gap-2">
+          <button className="btn-secondary" disabled={loading || Boolean(busy)} onClick={() => void load()}><RefreshCw size={14} className={loading ? 'animate-spin' : ''} /> Refresh</button>
+          <button className="btn-primary" disabled={!stopped || Boolean(busy) || Boolean(operation)} onClick={() => void createBackup()}>{busy === 'create' ? <RefreshCw size={14} className="animate-spin" /> : <Archive size={14} />} Back up now</button>
+        </div>
+      </div>
+
+      {!stopped && <div className="rounded-xl border border-amber-500/20 bg-amber-500/[0.045] px-4 py-3 text-sm text-amber-200/80">Manual backups and restoration require a fully stopped server. Scheduled backups stop gracefully and restart only when the server was previously running.</div>}
+      {operation && <div className="rounded-xl border border-blue-500/20 bg-blue-500/[0.045] px-4 py-3 text-sm text-blue-200/80">Backup operation in progress: {operation.replaceAll('_', ' ')}. Do not start the server or stop BLSM.</div>}
+      {notice && <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/[0.045] px-4 py-3 text-sm text-emerald-300/80">{notice}</div>}
+
+      <div className="grid gap-3 sm:grid-cols-3">
+        <Metric icon={<Archive size={17} />} label="Stored backups" value={String(completed.length)} detail={`${records.filter((record) => record.status === 'failed').length} failed attempts retained in history`} />
+        <Metric icon={<HardDrive size={17} />} label="Disk usage" value={formatBytes(totalBytes)} detail={policy ? `${formatBytes(policy.max_total_mb * 1024 * 1024)} configured limit` : 'Loading retention policy'} />
+        <Metric icon={<RefreshCw size={17} />} label="Next scheduled" value={policy?.enabled && policy.next_run_at ? formatDate(policy.next_run_at, true) : 'Disabled'} detail={policy?.last_run_at ? `Last attempt ${formatDate(policy.last_run_at, true)}` : 'No scheduled attempts yet'} />
+      </div>
+
+      {policy && <section className="panel">
+        <div className="panel-header"><div><h3 className="panel-title">Schedule and retention</h3><p className="panel-description">Defaults retain seven archives with a 40 GB ceiling for SSD-conscious operation</p></div><button className="btn-primary" disabled={Boolean(busy)} onClick={() => void savePolicy()}><Save size={14} /> {busy === 'policy' ? 'Saving…' : 'Save schedule'}</button></div>
+        <div className="grid gap-5 p-5 md:grid-cols-2 xl:grid-cols-4">
+          <label className="field-label">Scheduled backups<select className="input mt-2" value={policy.enabled ? 'true' : 'false'} onChange={(event) => setPolicy({ ...policy, enabled: event.target.value === 'true' })}><option value="false">Disabled</option><option value="true">Enabled</option></select></label>
+          <label className="field-label">Frequency<select className="input mt-2" value={policy.interval_hours} onChange={(event) => setPolicy({ ...policy, interval_hours: Number(event.target.value) })}><option value={6}>Every 6 hours</option><option value={12}>Every 12 hours</option><option value={24}>Daily</option><option value={48}>Every 2 days</option><option value={72}>Every 3 days</option><option value={168}>Weekly</option></select></label>
+          <label className="field-label">Keep latest<input className="input mt-2" type="number" min={1} max={100} value={policy.retention_count} onChange={(event) => setPolicy({ ...policy, retention_count: Number(event.target.value) })} /><span className="mt-2 block text-xs text-zinc-600">Oldest archives are removed first.</span></label>
+          <label className="field-label">Storage ceiling (GB)<input className="input mt-2" type="number" min={1} max={200} value={Math.round(policy.max_total_mb / 1024)} onChange={(event) => setPolicy({ ...policy, max_total_mb: Number(event.target.value) * 1024 })} /><span className="mt-2 block text-xs text-zinc-600">Retention also cleans up when this limit is exceeded.</span></label>
+        </div>
+        {policy.last_error && <div className="border-t border-red-500/10 px-5 py-3 text-sm text-red-300/80">Last scheduled attempt: {policy.last_error}</div>}
+      </section>}
+
+      <section className="panel overflow-hidden">
+        <div className="panel-header"><div><h3 className="panel-title">Backup history</h3><p className="panel-description">Worlds, mods, server configuration, and managed mod metadata</p></div></div>
+        {loading && !state ? <div className="grid min-h-40 place-items-center text-sm text-zinc-600"><RefreshCw className="animate-spin" size={18} /></div> : records.length === 0 ? <div className="px-5 py-12 text-center"><Archive className="mx-auto text-zinc-700" size={22} /><p className="mt-3 text-sm text-zinc-500">No backups yet.</p><p className="mt-1 text-xs text-zinc-700">Stop the server and create the first archive.</p></div> : <div className="divide-y divide-zinc-800/70">
+          {records.map((record) => <div key={record.id} className="flex flex-col gap-4 px-5 py-4 lg:flex-row lg:items-center">
+            <div className={`grid size-9 shrink-0 place-items-center rounded-lg border ${record.status === 'complete' ? 'border-emerald-500/15 bg-emerald-500/[0.06] text-emerald-400' : record.status === 'failed' ? 'border-red-500/15 bg-red-500/[0.06] text-red-400' : 'border-blue-500/15 bg-blue-500/[0.06] text-blue-400'}`}>{record.status === 'complete' ? <Archive size={16} /> : <RefreshCw size={16} className={record.status === 'creating' ? 'animate-spin' : ''} />}</div>
+            <div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><p className="truncate text-sm font-medium text-zinc-200">{record.filename}</p><span className="rounded border border-zinc-800 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-zinc-500">{record.kind.replace('_', ' ')}</span></div><p className="mt-1 text-xs text-zinc-600">{formatDate(record.created_at)}{record.status === 'complete' ? ` · ${formatBytes(record.size_bytes)} compressed from ${formatBytes(record.source_bytes)}` : record.error ? ` · ${record.error}` : ` · ${record.status}`}</p>{record.sha256 && <p className="mt-1 truncate font-mono text-[10px] text-zinc-700">SHA-256 {record.sha256}</p>}</div>
+            {record.status === 'complete' && <div className="flex gap-1 self-end lg:self-auto"><button className="icon-btn" disabled={Boolean(busy)} onClick={() => void downloadBackup(record)} aria-label={`Download ${record.filename}`} title="Download"><Download size={15} /></button><button className="icon-btn" disabled={!stopped || Boolean(busy)} onClick={() => void restoreBackup(record)} aria-label={`Restore ${record.filename}`} title="Restore"><RotateCcw size={15} /></button><button className="icon-btn text-zinc-500 hover:text-red-300" disabled={Boolean(busy)} onClick={() => void deleteBackup(record)} aria-label={`Delete ${record.filename}`} title="Delete"><Trash2 size={15} /></button></div>}
+          </div>)}
+        </div>}
+      </section>
+    </div>
   )
 }
 
@@ -968,11 +1124,30 @@ function ModsView({ server, setError }: { server: Server; setError: (error: stri
 
 function CreateServerModal({ onClose, onCreated }: { onClose: () => void; onCreated: (server: Server) => void }) {
   const [name, setName] = useState('Minecraft Server')
-  const [version, setVersion] = useState('1.21.4')
+  const [version, setVersion] = useState(BUNDLED_MINECRAFT_VERSIONS[0])
+  const [versions, setVersions] = useState(BUNDLED_MINECRAFT_VERSIONS)
+  const [versionsLoading, setVersionsLoading] = useState(true)
+  const [versionWarning, setVersionWarning] = useState('')
   const [memory, setMemory] = useState(4096)
   const [eula, setEula] = useState(false)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    void api.adapterVersions('minecraft-fabric').then((available) => {
+      if (cancelled || available.length === 0) return
+      setVersions(available)
+      setVersion((current) => available.includes(current) ? current : available[0])
+      setVersionWarning('')
+    }).catch(() => {
+      if (!cancelled) setVersionWarning('Live version lookup unavailable; showing bundled releases.')
+    }).finally(() => {
+      if (!cancelled) setVersionsLoading(false)
+    })
+    return () => { cancelled = true }
+  }, [])
+
   async function submit(event: FormEvent) {
     event.preventDefault(); setBusy(true); setError('')
     try { onCreated(await api.createServer({ name, adapter: 'minecraft-fabric', game_version: version, memory_mb: memory, server_port: 25565, rcon_port: 25575, accept_eula: eula })) }
@@ -985,13 +1160,13 @@ function CreateServerModal({ onClose, onCreated }: { onClose: () => void; onCrea
         <div className="space-y-5 p-5">
           <label className="field-label">Server name<input required className="input mt-2" value={name} onChange={(event) => setName(event.target.value)} /></label>
           <div className="grid gap-4 sm:grid-cols-2">
-            <label className="field-label">Game version<input required pattern="[0-9A-Za-z.+_-]+" className="input mt-2" value={version} onChange={(event) => setVersion(event.target.value)} /></label>
+            <label className="field-label">Game version<select required className="input mt-2" value={version} onChange={(event) => setVersion(event.target.value)}>{versions.map((item) => <option key={item} value={item}>{item}</option>)}</select><span className={`mt-2 block text-xs leading-5 ${versionWarning ? 'text-amber-300/70' : 'text-zinc-600'}`}>{versionsLoading ? 'Loading stable Fabric releases…' : versionWarning || `${versions.length} stable Fabric releases available.`}</span></label>
             <label className="field-label">Memory<select className="input mt-2" value={memory} onChange={(event) => setMemory(Number(event.target.value))}><option value={2048}>2 GB</option><option value={4096}>4 GB</option><option value={6144}>6 GB</option><option value={8192}>8 GB</option><option value={10240}>10 GB</option><option value={12288}>12 GB</option></select></label>
           </div>
           <label className="flex cursor-pointer gap-3 rounded-lg border border-zinc-800 bg-zinc-900/40 p-4"><input type="checkbox" checked={eula} onChange={(event) => setEula(event.target.checked)} className="mt-0.5 size-4 accent-blue-500" /><span><span className="block text-sm text-zinc-300">Accept the Minecraft EULA</span><span className="mt-1 block text-xs leading-5 text-zinc-600">Required before BLSM can install and start the server. You confirm you have reviewed Mojang's EULA.</span></span></label>
           {error && <p className="text-sm text-red-300">{error}</p>}
         </div>
-        <div className="flex justify-end gap-2 border-t border-zinc-800/70 p-4"><button type="button" className="btn-secondary" onClick={onClose}>Cancel</button><button disabled={busy || !eula} className="btn-primary">{busy ? <RefreshCw size={14} className="animate-spin" /> : <Plus size={15} />} Create server</button></div>
+        <div className="flex justify-end gap-2 border-t border-zinc-800/70 p-4"><button type="button" className="btn-secondary" onClick={onClose}>Cancel</button><button disabled={busy || versionsLoading || !eula} className="btn-primary">{busy ? <RefreshCw size={14} className="animate-spin" /> : <Plus size={15} />} Create server</button></div>
       </form>
     </div>
   )
@@ -1007,6 +1182,27 @@ function formatDuration(seconds: number): string {
 
 function formatDownloads(value: number): string {
   return new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 }).format(value)
+}
+
+function formatBytes(value: number): string {
+  if (value < 1024) return `${value} B`
+  const units = ['KB', 'MB', 'GB', 'TB']
+  let size = value / 1024
+  let unit = 0
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024
+    unit += 1
+  }
+  return `${size.toFixed(size >= 10 ? 0 : 1)} ${units[unit]}`
+}
+
+function formatDate(value: string, compact = false): string {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return 'Unknown'
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: compact ? 'short' : 'medium',
+    timeStyle: 'short',
+  }).format(date)
 }
 
 export default App

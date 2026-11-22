@@ -70,6 +70,13 @@ class GameRulesUpdate(BaseModel):
         return values
 
 
+class BackupPolicyUpdate(BaseModel):
+    enabled: bool = False
+    interval_hours: int = Field(default=24, ge=1, le=168)
+    retention_count: int = Field(default=7, ge=1, le=100)
+    max_total_mb: int = Field(default=40960, ge=1024, le=204800)
+
+
 class ModInstall(BaseModel):
     project_id: str = Field(min_length=1, max_length=128)
     title: str | None = Field(default=None, max_length=256)

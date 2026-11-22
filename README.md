@@ -13,9 +13,10 @@ BLSM (pronounced “Blossom”) is a lightweight, LAN-first game-server control 
 - Searchable Settings tab for every `server.properties` value, with typed controls, concise guidance, masked secrets, and support for future properties
 - Modrinth search filtered to the server's Minecraft and Fabric versions
 - Verified mod install, update, and removal (downloads are checked against Modrinth SHA-512 hashes)
+- Manual and scheduled compressed backups with history, downloads, retention cleanup, restoration, and automatic pre-restore safety snapshots
 - Capability-driven React UI and a modular `ServerAdapter` backend boundary
 
-Backups, file browsing, and map integration are represented in the architecture but are not part of this first MVP. Inventory editing is intentionally excluded.
+File browsing and map integration are represented in the architecture but are not yet implemented. Inventory editing is intentionally excluded.
 
 ## Requirements
 
@@ -90,10 +91,12 @@ sudo blsm-update --repo https://github.com/Brunozhon/blsm
 Backups are stored in `/var/backups/blsm/<UTC timestamp>/` and contain:
 
 - `config/`: the complete `/etc/blsm` configuration
-- `data/`: SQLite state, server configurations, worlds, mods, logs, and other server files
+- `data/`: SQLite state, server configurations, worlds, mods, logs, and other server files; dashboard-managed backup archives are excluded to avoid duplicating large files
 - `manifest.txt`: the old and new release identifiers
 
 Unchanged files are hard-linked to the previous snapshot to reduce disk usage. Five snapshots are retained by default; set `BLSM_BACKUP_RETENTION` when invoking the updater to change that number. Updates never replace or delete `/var/lib/blsm`.
+
+Dashboard-managed archives remain in `/var/lib/blsm/backups` during updates. They are deliberately not copied into `/var/backups/blsm` because doing so would duplicate potentially large world archives; the updater never removes or replaces the persistent data directory.
 
 To restore data, stop BLSM and all managed game servers first, then use `rsync` from the selected snapshot. Keep the original data directory until the restored dashboard and servers have been verified.
 
@@ -106,6 +109,24 @@ sudo systemctl restart blsm
 ```
 
 Minecraft runs in a separate OS session. Restarting the BLSM web service does not stop a running game server. Stop game servers from the dashboard before shutting down the machine.
+
+### Managed server backups
+
+The **Backups** tab manages per-server archives independently of the updater snapshots described above. Manual backups require the Minecraft server to be fully stopped. A scheduled backup records restart intent, requests a graceful shutdown, creates the archive, and restarts the server only if it was running before the job. A failed graceful shutdown aborts the backup instead of force-killing Minecraft.
+
+Each archive contains the managed server files—including worlds, dimensions, mods, datapacks, properties, allowlists, and operator data—plus a small manifest containing the adapter configuration and installed-mod inventory. Console output and transient world lock files are excluded. Symbolic links are not followed or archived, preventing a managed server from pulling unrelated external files into a backup.
+
+Archives are streamed directly to `BLSM_DATA_DIR/backups/<server-id>/` as gzip-compressed tar files using a low CPU compression level. A `.partial` archive is atomically renamed only after completion, avoiding an uncompressed temporary copy. BLSM conservatively requires enough free space for the uncompressed source plus a 1 GB reserve before starting. Defaults suitable for a 256 GB SSD are:
+
+- One scheduled backup every 24 hours
+- The latest 7 completed archives retained
+- A 40 GB per-server storage ceiling
+
+Both frequency and retention limits are configurable in the dashboard. The oldest completed archives are removed first when either limit is exceeded. Failed attempts remain visible for diagnosis but do not consume archive space.
+
+Restoration requires a fully stopped server and accepts only a complete backup created for that same server and adapter. Before changing files, BLSM creates a `pre_restore` safety backup. It validates archive paths and file types, extracts into a same-filesystem staging directory, and atomically swaps the server directory. A restore journal rolls back an interrupted swap when BLSM starts again. Downloaded archives contain server secrets such as the RCON password in `server.properties`; store them accordingly.
+
+Scheduling is interval-based rather than cron-based, and requires the BLSM service to be running. Missed jobs become due when BLSM starts again. The adapter interface includes a pre-shutdown coordination hook for a future Fabric companion mod. Until that mod exists, scheduled jobs do not provide in-game countdown warnings; they issue Minecraft's normal graceful stop when the interval becomes due.
 
 ### Uninstalling
 
@@ -169,7 +190,7 @@ npm run build
 
 ```text
 backend/blsm/adapters/   capability contract and game adapters
-backend/blsm/services/   process supervision and Modrinth workflows
+backend/blsm/services/   process supervision, backups, and Modrinth workflows
 backend/blsm/api.py      authenticated HTTP and WebSocket API
 frontend/src/            React application and Tailwind styling
 data/                    runtime state (ignored by Git)

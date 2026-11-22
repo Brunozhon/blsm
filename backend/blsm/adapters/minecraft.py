@@ -86,6 +86,27 @@ class MinecraftFabricAdapter(ServerAdapter):
             "memory_mb": max(1024, int(config.get("memory_mb", 4096))),
         }
 
+    async def available_versions(self) -> list[str]:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+            response = await client.get(f"{FABRIC_META}/versions/game")
+            response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, list):
+            raise RuntimeError("Fabric returned an invalid game version list")
+        versions = list(
+            dict.fromkeys(
+                str(item["version"])
+                for item in payload
+                if isinstance(item, dict)
+                and item.get("stable") is True
+                and isinstance(item.get("version"), str)
+                and re.fullmatch(r"[0-9A-Za-z.+_-]+", item["version"])
+            )
+        )
+        if not versions:
+            raise RuntimeError("Fabric did not return any stable game versions")
+        return versions
+
     @staticmethod
     async def _latest_version(client: httpx.AsyncClient, url: str) -> str:
         response = await client.get(url)

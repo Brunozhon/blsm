@@ -43,6 +43,7 @@ class ProcessManager:
         self._cpu_samples: dict[int, tuple[int, float]] = {}
         self._owned_processes: dict[int, OwnedProcess] = {}
         self._watch_tasks: set[asyncio.Task[None]] = set()
+        self._blocked_servers: set[str] = set()
         self._poll_interval = poll_interval
         self._startup_grace = startup_grace
 
@@ -72,8 +73,22 @@ class ProcessManager:
         adapter = self.adapters[server["adapter"]]
         return "stopped" if adapter.is_installed(path) else "not_installed"
 
-    async def start(self, server: dict[str, Any]) -> None:
+    def block_server_operations(self, server_id: str) -> None:
+        self._blocked_servers.add(server_id)
+
+    def unblock_server_operations(self, server_id: str) -> None:
+        self._blocked_servers.discard(server_id)
+
+    def _require_unblocked(self, server_id: str, allow_blocked: bool) -> None:
+        if not allow_blocked and server_id in self._blocked_servers:
+            raise ProcessError("A backup or restore operation is in progress")
+
+    async def start(
+        self, server: dict[str, Any], *, allow_blocked: bool = False
+    ) -> None:
+        self._require_unblocked(server["id"], allow_blocked)
         async with self._lock(server["id"]):
+            self._require_unblocked(server["id"], allow_blocked)
             if self._pid_alive(server.get("pid")):
                 raise ProcessError("Server is already running")
             adapter = self.adapters[server["adapter"]]
@@ -134,8 +149,17 @@ class ProcessManager:
                 )
             owned.startup_complete = True
 
-    async def stop(self, server: dict[str, Any], timeout: float = 30) -> None:
+    async def stop(
+        self,
+        server: dict[str, Any],
+        timeout: float = 30,
+        *,
+        force: bool = True,
+        allow_blocked: bool = False,
+    ) -> None:
+        self._require_unblocked(server["id"], allow_blocked)
         async with self._lock(server["id"]):
+            self._require_unblocked(server["id"], allow_blocked)
             pid = server.get("pid")
             if not self._pid_alive(pid):
                 self.db.update_server_runtime(server["id"], None, None)
@@ -143,12 +167,20 @@ class ProcessManager:
             adapter = self.adapters[server["adapter"]]
             try:
                 await adapter.graceful_stop(Path(server["path"]), server["config"])
-            except Exception:
+            except Exception as exc:
+                if not force:
+                    raise ProcessError(
+                        "The server did not accept a graceful shutdown request"
+                    ) from exc
                 os.killpg(int(pid), signal.SIGTERM)
             deadline = asyncio.get_running_loop().time() + timeout
             while self._pid_alive(pid) and asyncio.get_running_loop().time() < deadline:
                 await asyncio.sleep(0.25)
             if self._pid_alive(pid):
+                if not force:
+                    raise ProcessError(
+                        "The server did not stop before the backup shutdown timeout"
+                    )
                 os.killpg(int(pid), signal.SIGKILL)
                 kill_deadline = asyncio.get_running_loop().time() + 5
                 while (

@@ -38,6 +38,35 @@ CREATE TABLE IF NOT EXISTS installed_mods (
     installed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (server_id, project_id)
 );
+
+CREATE TABLE IF NOT EXISTS backup_policies (
+    server_id TEXT PRIMARY KEY REFERENCES servers(id) ON DELETE CASCADE,
+    enabled INTEGER NOT NULL DEFAULT 0,
+    interval_hours INTEGER NOT NULL DEFAULT 24,
+    retention_count INTEGER NOT NULL DEFAULT 7,
+    max_total_mb INTEGER NOT NULL DEFAULT 40960,
+    next_run_at TEXT,
+    last_run_at TEXT,
+    last_error TEXT
+);
+
+CREATE TABLE IF NOT EXISTS backups (
+    id TEXT PRIMARY KEY,
+    server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+    filename TEXT NOT NULL UNIQUE,
+    kind TEXT NOT NULL,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    completed_at TEXT,
+    size_bytes INTEGER NOT NULL DEFAULT 0,
+    source_bytes INTEGER NOT NULL DEFAULT 0,
+    sha256 TEXT,
+    error TEXT,
+    restart_after INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS backups_server_created
+ON backups(server_id, created_at DESC);
 """
 
 
@@ -173,6 +202,178 @@ class Database:
                 (server_id, project_id),
             )
         return dict(row) if row else None
+
+    def replace_mods(self, server_id: str, mods: list[dict[str, str]]) -> None:
+        with self.connect() as connection:
+            connection.execute("DELETE FROM installed_mods WHERE server_id = ?", (server_id,))
+            connection.executemany(
+                "INSERT INTO installed_mods(server_id, project_id, version_id, title, filename) "
+                "VALUES (?, ?, ?, ?, ?)",
+                [
+                    (
+                        server_id,
+                        mod["project_id"],
+                        mod["version_id"],
+                        mod["title"],
+                        mod["filename"],
+                    )
+                    for mod in mods
+                ],
+            )
+
+    def restore_server_metadata(
+        self, server_id: str, config: dict[str, Any], mods: list[dict[str, str]]
+    ) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE servers SET config = ? WHERE id = ?",
+                (json.dumps(config), server_id),
+            )
+            connection.execute("DELETE FROM installed_mods WHERE server_id = ?", (server_id,))
+            connection.executemany(
+                "INSERT INTO installed_mods(server_id, project_id, version_id, title, filename) "
+                "VALUES (?, ?, ?, ?, ?)",
+                [
+                    (
+                        server_id,
+                        mod["project_id"],
+                        mod["version_id"],
+                        mod["title"],
+                        mod["filename"],
+                    )
+                    for mod in mods
+                ],
+            )
+
+    def get_backup_policy(self, server_id: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM backup_policies WHERE server_id = ?", (server_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def set_backup_policy(self, server_id: str, policy: dict[str, Any]) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "INSERT INTO backup_policies(server_id, enabled, interval_hours, "
+                "retention_count, max_total_mb, next_run_at, last_run_at, last_error) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(server_id) DO UPDATE SET enabled=excluded.enabled, "
+                "interval_hours=excluded.interval_hours, "
+                "retention_count=excluded.retention_count, "
+                "max_total_mb=excluded.max_total_mb, next_run_at=excluded.next_run_at, "
+                "last_run_at=excluded.last_run_at, last_error=excluded.last_error",
+                (
+                    server_id,
+                    int(bool(policy["enabled"])),
+                    int(policy["interval_hours"]),
+                    int(policy["retention_count"]),
+                    int(policy["max_total_mb"]),
+                    policy.get("next_run_at"),
+                    policy.get("last_run_at"),
+                    policy.get("last_error"),
+                ),
+            )
+
+    def list_due_backup_policies(self, now: str) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM backup_policies WHERE enabled = 1 "
+                "AND next_run_at IS NOT NULL AND next_run_at <= ? ORDER BY next_run_at",
+                (now,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def create_backup_record(self, backup: dict[str, Any]) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "INSERT INTO backups(id, server_id, filename, kind, status, created_at, "
+                "restart_after) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    backup["id"],
+                    backup["server_id"],
+                    backup["filename"],
+                    backup["kind"],
+                    backup["status"],
+                    backup["created_at"],
+                    int(bool(backup.get("restart_after"))),
+                ),
+            )
+
+    def update_backup_record(self, backup_id: str, **values: Any) -> None:
+        allowed = {
+            "status",
+            "completed_at",
+            "size_bytes",
+            "source_bytes",
+            "sha256",
+            "error",
+            "restart_after",
+        }
+        invalid = values.keys() - allowed
+        if invalid:
+            raise ValueError(f"Invalid backup fields: {', '.join(sorted(invalid))}")
+        if not values:
+            return
+        normalized = {
+            key: int(bool(value)) if key == "restart_after" else value
+            for key, value in values.items()
+        }
+        assignments = ", ".join(f"{key} = ?" for key in normalized)
+        with self.connect() as connection:
+            connection.execute(
+                f"UPDATE backups SET {assignments} WHERE id = ?",  # noqa: S608
+                (*normalized.values(), backup_id),
+            )
+
+    def get_backup(self, server_id: str, backup_id: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM backups WHERE server_id = ? AND id = ?",
+                (server_id, backup_id),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_backups(self, server_id: str) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM backups WHERE server_id = ? ORDER BY created_at DESC",
+                (server_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def delete_backup_record(self, server_id: str, backup_id: str) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "DELETE FROM backups WHERE server_id = ? AND id = ?",
+                (server_id, backup_id),
+            )
+
+    def mark_interrupted_backups(self) -> list[str]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT DISTINCT server_id FROM backups WHERE restart_after = 1"
+            ).fetchall()
+            connection.execute(
+                "UPDATE backups SET status = 'failed', "
+                "error = 'Backup was interrupted before completion' "
+                "WHERE status IN ('preparing', 'creating')"
+            )
+        return [str(row["server_id"]) for row in rows]
+
+    def list_backup_restart_pending(self) -> list[str]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT DISTINCT server_id FROM backups WHERE restart_after = 1"
+            ).fetchall()
+        return [str(row["server_id"]) for row in rows]
+
+    def clear_backup_restart(self, server_id: str) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE backups SET restart_after = 0 WHERE server_id = ?",
+                (server_id,),
+            )
 
     @staticmethod
     def _server_row(row: sqlite3.Row) -> dict[str, Any]:

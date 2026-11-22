@@ -181,3 +181,16 @@ async def test_manager_shutdown_preserves_independent_process(
     finally:
         os.killpg(pid, signal.SIGTERM)
         os.waitpid(pid, 0)
+
+
+async def test_backup_guard_blocks_lifecycle_actions(tmp_path: Path) -> None:
+    _, server, manager = create_runtime(
+        tmp_path, [sys.executable, "-c", "import time; time.sleep(30)"]
+    )
+    manager.block_server_operations(server["id"])
+
+    with pytest.raises(ProcessError, match="backup or restore"):
+        await manager.start(server)
+
+    manager.unblock_server_operations(server["id"])
+    await manager.shutdown()

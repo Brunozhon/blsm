@@ -14,6 +14,7 @@ from .api import console_socket, router
 from .auth import SessionManager, configure_admin
 from .config import Settings, read_or_create_secret
 from .db import Database
+from .services.backups import BackupService
 from .services.modrinth import ModrinthService
 from .services.processes import ProcessManager
 
@@ -81,9 +82,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.sessions = SessionManager(read_or_create_secret(current_settings.data_dir))
         app.state.processes = ProcessManager(db, adapters)
         app.state.modrinth = ModrinthService(db)
+        app.state.backups = BackupService(
+            db,
+            app.state.processes,
+            current_settings.backups_dir,
+            current_settings.servers_dir,
+        )
+        await app.state.backups.start()
         try:
             yield
         finally:
+            await app.state.backups.shutdown()
             await app.state.processes.shutdown()
 
     app = FastAPI(

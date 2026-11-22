@@ -67,6 +67,37 @@ export interface GameRules {
   online: boolean
 }
 
+export interface BackupRecord {
+  id: string
+  server_id: string
+  filename: string
+  kind: 'manual' | 'scheduled' | 'pre_restore'
+  status: 'preparing' | 'creating' | 'complete' | 'failed'
+  created_at: string
+  completed_at?: string | null
+  size_bytes: number
+  source_bytes: number
+  sha256?: string | null
+  error?: string | null
+}
+
+export interface BackupPolicy {
+  server_id: string
+  enabled: boolean
+  interval_hours: number
+  retention_count: number
+  max_total_mb: number
+  next_run_at?: string | null
+  last_run_at?: string | null
+  last_error?: string | null
+}
+
+export interface BackupState {
+  backups: BackupRecord[]
+  policy: BackupPolicy
+  operation?: string | null
+}
+
 export interface ModResult {
   project_id: string
   slug: string

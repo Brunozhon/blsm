@@ -44,6 +44,41 @@ def test_game_rule_catalog_covers_minecraft_26_3() -> None:
     assert MINECRAFT_GAME_RULES["minecraft:pvp"]["type"] == "boolean"
 
 
+async def test_available_versions_only_returns_stable_valid_releases(
+    monkeypatch: Any,
+) -> None:
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> list[dict[str, Any]]:
+            return [
+                {"version": "26.3", "stable": True},
+                {"version": "26.4-snapshot-1", "stable": False},
+                {"version": "1.21.11", "stable": True},
+                {"version": "invalid version", "stable": True},
+                {"version": "26.3", "stable": True},
+            ]
+
+    class FakeClient:
+        def __init__(self, **_: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> "FakeClient":
+            return self
+
+        async def __aexit__(self, *_: Any) -> None:
+            return None
+
+        async def get(self, url: str) -> FakeResponse:
+            assert url == "https://meta.fabricmc.net/v2/versions/game"
+            return FakeResponse()
+
+    monkeypatch.setattr(minecraft.httpx, "AsyncClient", FakeClient)
+
+    assert await MinecraftFabricAdapter().available_versions() == ["26.3", "1.21.11"]
+
+
 def test_rejects_java_runtime_that_is_too_old(monkeypatch: Any) -> None:
     monkeypatch.setattr(minecraft.shutil, "which", lambda executable: "/usr/bin/java")
     monkeypatch.setattr(

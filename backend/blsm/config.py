@@ -47,9 +47,14 @@ class Settings:
     def servers_dir(self) -> Path:
         return self.data_dir / "servers"
 
+    @property
+    def backups_dir(self) -> Path:
+        return self.data_dir / "backups"
+
     def ensure_directories(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.servers_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.backups_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
 
 
 def read_or_create_secret(data_dir: Path) -> bytes:

@@ -4,7 +4,7 @@ import asyncio
 import re
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import httpx
 from fastapi import (
@@ -16,10 +16,12 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
+from fastapi.responses import FileResponse
 
 from .adapters.base import AdapterCapability
 from .auth import hash_password, require_admin, verify_password
 from .schemas import (
+    BackupPolicyUpdate,
     ConsoleCommand,
     GameRulesUpdate,
     ModInstall,
@@ -29,6 +31,7 @@ from .schemas import (
     ServerSettingsUpdate,
     WhitelistSetting,
 )
+from .services.backups import BackupBusy, BackupError
 
 router = APIRouter(prefix="/api")
 
@@ -47,6 +50,15 @@ def _server_or_404(request: Request, server_id: str) -> dict[str, Any]:
     if server is None:
         raise HTTPException(status_code=404, detail="Server not found")
     return server
+
+
+def _require_no_backup_operation(request: Request, server_id: str) -> None:
+    operation = request.app.state.backups.operation(server_id)
+    if operation:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Cannot modify the server while {operation.replace('_', ' ')} is in progress",
+        )
 
 
 def _public_server(request: Request, server: dict[str, Any]) -> dict[str, Any]:
@@ -105,6 +117,17 @@ async def adapters(request: Request) -> list[dict[str, Any]]:
     return [adapter.public_metadata() for adapter in request.app.state.adapters.values()]
 
 
+@router.get("/adapters/{adapter_key}/versions", dependencies=[Depends(require_admin)])
+async def adapter_versions(request: Request, adapter_key: str) -> list[str]:
+    adapter = request.app.state.adapters.get(adapter_key)
+    if adapter is None:
+        raise HTTPException(status_code=404, detail="Server adapter not found")
+    try:
+        return await adapter.available_versions()
+    except (RuntimeError, httpx.HTTPError) as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
 @router.get("/servers", dependencies=[Depends(require_admin)])
 async def list_servers(request: Request) -> list[dict[str, Any]]:
     return [_public_server(request, server) for server in request.app.state.db.list_servers()]
@@ -141,6 +164,7 @@ async def get_server(request: Request, server_id: str) -> dict[str, Any]:
 @router.post("/servers/{server_id}/install", dependencies=[Depends(require_admin)])
 async def install_server(request: Request, server_id: str) -> dict[str, Any]:
     server = _server_or_404(request, server_id)
+    _require_no_backup_operation(request, server_id)
     if request.app.state.processes.status(server) == "running":
         raise HTTPException(status_code=409, detail="Stop the server before installing")
     if not server["config"].get("accept_eula"):
@@ -262,6 +286,7 @@ async def update_server_settings(
     request: Request, server_id: str, payload: ServerSettingsUpdate
 ) -> dict[str, Any]:
     server = _server_or_404(request, server_id)
+    _require_no_backup_operation(request, server_id)
     adapter = _settings_adapter(request, server)
     if request.app.state.processes.status(server) == "running":
         raise HTTPException(status_code=409, detail="Stop the server before changing settings")
@@ -274,6 +299,103 @@ async def update_server_settings(
     request.app.state.db.update_server_config(server_id, config)
     updated = _server_or_404(request, server_id)
     return _settings_view(adapter, updated)
+
+
+def _backup_server(request: Request, server_id: str) -> dict[str, Any]:
+    server = _server_or_404(request, server_id)
+    _capability_adapter(
+        request,
+        server,
+        AdapterCapability.BACKUPS,
+        "This server does not support managed backups",
+    )
+    return server
+
+
+def _raise_backup_error(exc: BackupError) -> NoReturn:
+    detail = str(exc)
+    if isinstance(exc, BackupBusy):
+        raise HTTPException(status_code=409, detail=detail) from exc
+    if "disk space" in detail.lower():
+        raise HTTPException(status_code=507, detail=detail) from exc
+    raise HTTPException(status_code=409, detail=detail) from exc
+
+
+@router.get("/servers/{server_id}/backups", dependencies=[Depends(require_admin)])
+async def backups(request: Request, server_id: str) -> dict[str, Any]:
+    _backup_server(request, server_id)
+    return {
+        "backups": request.app.state.db.list_backups(server_id),
+        "policy": request.app.state.backups.policy(server_id),
+        "operation": request.app.state.backups.operation(server_id),
+    }
+
+
+@router.post(
+    "/servers/{server_id}/backups",
+    dependencies=[Depends(require_admin)],
+    status_code=201,
+)
+async def create_backup(request: Request, server_id: str) -> dict[str, Any]:
+    server = _backup_server(request, server_id)
+    try:
+        return await request.app.state.backups.manual_backup(server)
+    except BackupError as exc:
+        _raise_backup_error(exc)
+
+
+@router.put("/servers/{server_id}/backup-policy", dependencies=[Depends(require_admin)])
+async def update_backup_policy(
+    request: Request, server_id: str, payload: BackupPolicyUpdate
+) -> dict[str, Any]:
+    _backup_server(request, server_id)
+    return request.app.state.backups.configure_policy(server_id, payload.model_dump())
+
+
+@router.get(
+    "/servers/{server_id}/backups/{backup_id}/download",
+    dependencies=[Depends(require_admin)],
+)
+async def download_backup(request: Request, server_id: str, backup_id: str) -> FileResponse:
+    _backup_server(request, server_id)
+    try:
+        path, record = request.app.state.backups.download_path(server_id, backup_id)
+    except BackupError as exc:
+        _raise_backup_error(exc)
+    return FileResponse(
+        path,
+        media_type="application/gzip",
+        filename=str(record["filename"]),
+    )
+
+
+@router.post(
+    "/servers/{server_id}/backups/{backup_id}/restore",
+    dependencies=[Depends(require_admin)],
+)
+async def restore_backup(
+    request: Request, server_id: str, backup_id: str
+) -> dict[str, Any]:
+    server = _backup_server(request, server_id)
+    try:
+        return await request.app.state.backups.restore(server, backup_id)
+    except BackupError as exc:
+        _raise_backup_error(exc)
+
+
+@router.delete(
+    "/servers/{server_id}/backups/{backup_id}",
+    dependencies=[Depends(require_admin)],
+)
+async def delete_backup(
+    request: Request, server_id: str, backup_id: str
+) -> dict[str, bool]:
+    _backup_server(request, server_id)
+    try:
+        await request.app.state.backups.delete(server_id, backup_id)
+    except BackupError as exc:
+        _raise_backup_error(exc)
+    return {"deleted": True}
 
 
 def _player_adapter(
@@ -404,6 +526,7 @@ async def install_mod(
     request: Request, server_id: str, payload: ModInstall
 ) -> dict[str, Any]:
     server = _server_or_404(request, server_id)
+    _require_no_backup_operation(request, server_id)
     try:
         return await request.app.state.modrinth.install(server, payload.project_id, payload.title)
     except (RuntimeError, httpx.HTTPError) as exc:
@@ -413,6 +536,7 @@ async def install_mod(
 @router.delete("/servers/{server_id}/mods/{project_id}", dependencies=[Depends(require_admin)])
 async def remove_mod(request: Request, server_id: str, project_id: str) -> dict[str, bool]:
     server = _server_or_404(request, server_id)
+    _require_no_backup_operation(request, server_id)
     try:
         request.app.state.modrinth.remove(server, project_id)
     except RuntimeError as exc:
@@ -425,6 +549,7 @@ async def remove_mod(request: Request, server_id: str, project_id: str) -> dict[
 )
 async def update_mod(request: Request, server_id: str, project_id: str) -> dict[str, Any]:
     server = _server_or_404(request, server_id)
+    _require_no_backup_operation(request, server_id)
     installed = next(
         (
             mod

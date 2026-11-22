@@ -55,6 +55,10 @@ class ServerAdapter(ABC):
         """Raise a useful error when host runtime requirements are not met."""
         return None
 
+    async def available_versions(self) -> list[str]:
+        """Return installable game versions, newest first."""
+        return []
+
     async def player_state(
         self, path: Path, config: dict[str, Any], query_online: bool
     ) -> dict[str, Any]:
@@ -102,6 +106,16 @@ class ServerAdapter(ABC):
     ) -> list[dict[str, Any]]:
         """Apply game rules and return refreshed adapter-normalized state."""
         raise NotImplementedError("This server adapter does not expose game rules")
+
+    async def prepare_backup_shutdown(
+        self, path: Path, config: dict[str, Any]
+    ) -> None:
+        """Coordinate a scheduled shutdown before backup.
+
+        A future game-side companion may override this hook to warn players and
+        confirm readiness. Core backup code remains independent of that protocol.
+        """
+        return None
 
     def public_metadata(self) -> dict[str, Any]:
         return {
