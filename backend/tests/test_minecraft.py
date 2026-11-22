@@ -5,6 +5,11 @@ from typing import Any
 import pytest
 from blsm.adapters import minecraft
 from blsm.adapters.minecraft import MinecraftFabricAdapter
+from blsm.adapters.minecraft_properties import (
+    MINECRAFT_26_3_PROPERTY_NAMES,
+    PROPERTY_METADATA,
+    PROPERTY_METADATA_VERSION,
+)
 
 
 def test_java_requirements_follow_minecraft_versions() -> None:
@@ -15,6 +20,16 @@ def test_java_requirements_follow_minecraft_versions() -> None:
     assert required("1.21.4") == 21
     assert required("1.20.5") == 21
     assert required("1.20.4") == 17
+
+
+def test_property_descriptions_cover_minecraft_26_3() -> None:
+    assert PROPERTY_METADATA_VERSION == "26.3"
+    assert PROPERTY_METADATA.keys() >= MINECRAFT_26_3_PROPERTY_NAMES
+    assert all(
+        PROPERTY_METADATA[key].get("description")
+        for key in MINECRAFT_26_3_PROPERTY_NAMES
+    )
+    assert "Obsolete in 26.3" in PROPERTY_METADATA["pvp"]["description"]
 
 
 def test_rejects_java_runtime_that_is_too_old(monkeypatch: Any) -> None:

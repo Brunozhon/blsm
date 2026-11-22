@@ -600,7 +600,7 @@ function SettingsView({ server, setError }: { server: Server; setError: (error: 
   return (
     <div className="space-y-6">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
-        <div><h2 className="page-title">Settings</h2><p className="page-subtitle">Every property in server.properties, including version-specific values.</p></div>
+        <div><h2 className="page-title">Settings</h2><p className="page-subtitle">Every property in server.properties · descriptions aligned with Minecraft 26.3.</p></div>
         <div className="flex gap-2">
           <button className="btn-secondary" type="button" disabled={loading || saving} onClick={() => void load()}><RefreshCw size={14} className={loading ? 'animate-spin' : ''} /> Reload</button>
           <button className="btn-primary" type="button" disabled={!stopped || saving || dirtySettings.length === 0} onClick={() => void save()}><Save size={14} /> {saving ? 'Saving…' : `Save${dirtySettings.length ? ` (${dirtySettings.length})` : ''}`}</button>
