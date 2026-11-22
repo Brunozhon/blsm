@@ -429,16 +429,49 @@ activate_release() {
   mv -Tf "$temporary_link" "$APP_ROOT/current"
 }
 
+secure_release_permissions() {
+  local release_dir="$1"
+  local resolved_release releases_root
+  resolved_release="$(readlink -f -- "$release_dir")"
+  releases_root="$(readlink -f -- "$APP_ROOT/releases")"
+  [[ -n "$resolved_release" && "$resolved_release" == "$releases_root"/* ]] \
+    || die "Refusing to change permissions outside $releases_root: $release_dir"
+  chown -R root:"$SERVICE_GROUP" "$resolved_release"
+  chmod -R u=rwX,g=rX,o= "$resolved_release"
+}
+
+verify_release_access() {
+  local release_dir="$1"
+  runuser -u "$SERVICE_USER" -- test -x "$release_dir" \
+    && runuser -u "$SERVICE_USER" -- test -x "$release_dir/.venv/bin/python" \
+    && runuser -u "$SERVICE_USER" -- test -r "$release_dir/frontend/dist/index.html" \
+    || die "The $SERVICE_USER service account cannot access the built release"
+}
+
 health_check() {
   local attempt
   for attempt in {1..30}; do
-    if curl --fail --silent --show-error --max-time 2 \
+    if curl --fail --silent --max-time 2 \
       "http://127.0.0.1:$PORT/api/health" | grep -q '"status":"ok"'; then
       return 0
+    fi
+    if systemctl is-failed --quiet "$SERVICE_NAME.service" 2>/dev/null; then
+      return 1
+    fi
+    if (( attempt % 5 == 0 )); then
+      log "Waiting for BLSM to become healthy (${attempt}/30 seconds)"
     fi
     sleep 1
   done
   return 1
+}
+
+report_service_failure() {
+  printf '\n[BLSM] systemd service status:\n' >&2
+  systemctl status "$SERVICE_NAME.service" --no-pager --full >&2 || true
+  printf '\n[BLSM] recent service log:\n' >&2
+  journalctl -u "$SERVICE_NAME.service" --no-pager --output=short-precise -n 50 >&2 \
+    || true
 }
 
 install_system_dependencies
@@ -456,6 +489,10 @@ release_id="$(date -u +%Y%m%dT%H%M%SZ)"
 STAGING_DIR="$APP_ROOT/releases/.staging-$release_id-$$"
 final_release="$APP_ROOT/releases/$release_id"
 previous_release="$(readlink -f "$APP_ROOT/current" 2>/dev/null || true)"
+if [[ -n "$previous_release" && -d "$previous_release" ]]; then
+  log 'Repairing access to the existing BLSM release'
+  secure_release_permissions "$previous_release"
+fi
 
 log "Preparing release $release_id"
 install -d -m 0755 "$STAGING_DIR"
@@ -475,7 +512,8 @@ if [[ -z "$source_ref" ]]; then
 fi
 printf '%s\n' "${source_ref:-$release_id}" > "$STAGING_DIR/.blsm-release"
 build_release "$STAGING_DIR"
-chown -R root:root "$STAGING_DIR"
+secure_release_permissions "$STAGING_DIR"
+verify_release_access "$STAGING_DIR"
 mv "$STAGING_DIR" "$final_release"
 STAGING_DIR=""
 
@@ -488,6 +526,7 @@ systemctl enable "$SERVICE_NAME.service" >/dev/null
 log 'Starting BLSM'
 if ! systemctl restart "$SERVICE_NAME.service" || ! health_check; then
   warn 'The new release did not become healthy'
+  report_service_failure
   if [[ -n "$previous_release" && -d "$previous_release" ]]; then
     warn 'Rolling back to the previous application release'
     activate_release "$previous_release"
@@ -495,7 +534,6 @@ if ! systemctl restart "$SERVICE_NAME.service" || ! health_check; then
   else
     systemctl stop "$SERVICE_NAME.service" || true
   fi
-  journalctl -u "$SERVICE_NAME.service" --no-pager -n 30 >&2 || true
   die 'Installation failed; see the service log above'
 fi
 

@@ -51,6 +51,25 @@ activate_release() {
   mv -Tf "$temporary_link" "$APP_ROOT/current"
 }
 
+secure_release_permissions() {
+  local release_dir="$1"
+  local resolved_release releases_root
+  resolved_release="$(readlink -f -- "$release_dir")"
+  releases_root="$(readlink -f -- "$APP_ROOT/releases")"
+  [[ -n "$resolved_release" && "$resolved_release" == "$releases_root"/* ]] \
+    || die "Refusing to change permissions outside $releases_root: $release_dir"
+  chown -R root:"$SERVICE_GROUP" "$resolved_release"
+  chmod -R u=rwX,g=rX,o= "$resolved_release"
+}
+
+verify_release_access() {
+  local release_dir="$1"
+  runuser -u "$SERVICE_USER" -- test -x "$release_dir" \
+    && runuser -u "$SERVICE_USER" -- test -x "$release_dir/.venv/bin/python" \
+    && runuser -u "$SERVICE_USER" -- test -r "$release_dir/frontend/dist/index.html" \
+    || die "The $SERVICE_USER service account cannot access the built release"
+}
+
 resume_stopped_servers() {
   if [[ -z "$SERVER_STATE_FILE" || ! -f "$SERVER_STATE_FILE" ]]; then
     return 0
@@ -224,9 +243,11 @@ python3 -m venv "$STAGING_DIR/.venv"
   --disable-pip-version-check --upgrade pip wheel
 "$STAGING_DIR/.venv/bin/python" -m pip install \
   --disable-pip-version-check "$STAGING_DIR"
-chown -R root:root "$STAGING_DIR"
+secure_release_permissions "$STAGING_DIR"
+verify_release_access "$STAGING_DIR"
 
 PREVIOUS_RELEASE="$(readlink -f "$APP_ROOT/current")"
+secure_release_permissions "$PREVIOUS_RELEASE"
 log 'Stopping the BLSM web service'
 systemctl stop "$SERVICE_NAME.service"
 SERVICE_STOPPED=1
@@ -289,16 +310,26 @@ port="$(sed -n 's/^BLSM_PORT=//p' "$CONFIG_DIR/blsm.env" | tail -n 1)"
 port="${port:-8080}"
 healthy=0
 for attempt in {1..30}; do
-  if curl --fail --silent --show-error --max-time 2 \
+  if curl --fail --silent --max-time 2 \
     "http://127.0.0.1:$port/api/health" | grep -q '"status":"ok"'; then
     healthy=1
     break
+  fi
+  if systemctl is-failed --quiet "$SERVICE_NAME.service" 2>/dev/null; then
+    break
+  fi
+  if (( attempt % 5 == 0 )); then
+    log "Waiting for BLSM to become healthy (${attempt}/30 seconds)"
   fi
   sleep 1
 done
 
 if [[ $healthy -ne 1 ]]; then
-  journalctl -u "$SERVICE_NAME.service" --no-pager -n 30 >&2 || true
+  printf '\n[BLSM update] systemd service status:\n' >&2
+  systemctl status "$SERVICE_NAME.service" --no-pager --full >&2 || true
+  printf '\n[BLSM update] recent service log:\n' >&2
+  journalctl -u "$SERVICE_NAME.service" --no-pager --output=short-precise -n 50 >&2 \
+    || true
   die 'The updated service failed its health check'
 fi
 
