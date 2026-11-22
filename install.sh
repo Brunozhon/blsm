@@ -261,15 +261,22 @@ ensure_java() {
 }
 
 ensure_node() {
-  local node_major=0
+  local node_major=0 npm_version=""
   if command -v node >/dev/null 2>&1; then
     node_major="$(node --version | sed -E 's/^v([0-9]+).*/\1/')"
   fi
-  if [[ "$node_major" =~ ^[0-9]+$ ]] && (( node_major >= 20 )); then
-    log "Using Node.js $(node --version)"
+  if command -v npm >/dev/null 2>&1; then
+    npm_version="$(npm --version 2>/dev/null || true)"
+  fi
+  if [[ "$node_major" =~ ^[0-9]+$ ]] && (( node_major >= 20 )) \
+    && [[ -n "$npm_version" ]]; then
+    log "Using Node.js $(node --version) with npm $npm_version"
     return
   fi
 
+  if [[ "$node_major" =~ ^[0-9]+$ ]] && (( node_major >= 20 )); then
+    warn "Node.js $(node --version) is installed, but npm is missing or unusable"
+  fi
   log 'Installing Node.js 20 build toolchain'
   install_apt_signing_key \
     https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
@@ -278,8 +285,22 @@ ensure_node() {
     'deb [signed-by=/usr/share/keyrings/nodesource.gpg] https://deb.nodesource.com/node_20.x nodistro main'
   apt-get update
   apt-get install -y --no-install-recommends nodejs
+  hash -r
+  if ! command -v npm >/dev/null 2>&1 || ! npm --version >/dev/null 2>&1; then
+    warn 'The installed nodejs package does not provide a working npm; reinstalling it'
+    apt-get install -y --reinstall --no-install-recommends nodejs
+    hash -r
+  fi
+  command -v node >/dev/null 2>&1 || die 'The Node.js executable could not be installed'
   node_major="$(node --version | sed -E 's/^v([0-9]+).*/\1/')"
-  (( node_major >= 20 )) || die 'Node.js 20 or newer could not be installed'
+  [[ "$node_major" =~ ^[0-9]+$ ]] && (( node_major >= 20 )) \
+    || die 'Node.js 20 or newer could not be installed'
+  npm_version=""
+  if command -v npm >/dev/null 2>&1; then
+    npm_version="$(npm --version 2>/dev/null || true)"
+  fi
+  [[ -n "$npm_version" ]] || die 'npm could not be installed with Node.js'
+  log "Using Node.js $(node --version) with npm $npm_version"
 }
 
 create_service_account() {
@@ -325,6 +346,10 @@ EOF
 
 build_release() {
   local release_dir="$1"
+  command -v npm >/dev/null 2>&1 \
+    || die 'npm is required to build BLSM; rerun the installer to repair Node.js'
+  npm --version >/dev/null 2>&1 \
+    || die 'npm is installed but unusable; rerun the installer to repair Node.js'
   log 'Installing frontend dependencies and building the dashboard'
   (
     cd "$release_dir/frontend"

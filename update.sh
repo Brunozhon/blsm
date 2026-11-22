@@ -189,6 +189,11 @@ if [[ "$release_ref" == "$current_ref" && $FORCE -ne 1 ]]; then
   exit 0
 fi
 
+command -v npm >/dev/null 2>&1 \
+  || die 'npm is required to update BLSM; rerun the current install.sh to repair Node.js'
+npm --version >/dev/null 2>&1 \
+  || die 'npm is installed but unusable; rerun the current install.sh to repair Node.js'
+
 release_id="$(date -u +%Y%m%dT%H%M%SZ)-${release_ref//[^0-9A-Za-z._-]/_}"
 STAGING_DIR="$APP_ROOT/releases/.staging-$release_id-$$"
 final_release="$APP_ROOT/releases/$release_id"
