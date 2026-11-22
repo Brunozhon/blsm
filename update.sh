@@ -160,6 +160,12 @@ if [[ -f "$CONFIG_DIR/blsm.env" ]]; then
   # shellcheck disable=SC1090
   . "$CONFIG_DIR/blsm.env"
   DATA_DIR="${BLSM_DATA_DIR:-$DATA_DIR}"
+  if ! grep -q '^BLSM_FRONTEND_DIR=' "$CONFIG_DIR/blsm.env"; then
+    printf 'BLSM_FRONTEND_DIR=%s/current/frontend/dist\n' "$APP_ROOT" \
+      >> "$CONFIG_DIR/blsm.env"
+  fi
+  chown root:"$SERVICE_GROUP" "$CONFIG_DIR/blsm.env"
+  chmod 0640 "$CONFIG_DIR/blsm.env"
 fi
 
 exec 9>"$APP_ROOT/update.lock"
@@ -311,7 +317,9 @@ port="${port:-8080}"
 healthy=0
 for attempt in {1..30}; do
   if curl --fail --silent --max-time 2 \
-    "http://127.0.0.1:$port/api/health" | grep -q '"status":"ok"'; then
+      "http://127.0.0.1:$port/api/health" | grep -q '"status":"ok"' \
+    && curl --fail --silent --max-time 2 \
+      "http://127.0.0.1:$port/" | grep -q '<div id="root"></div>'; then
     healthy=1
     break
   fi

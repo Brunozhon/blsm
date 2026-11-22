@@ -146,6 +146,7 @@ Copy `.env.example` into your service environment. BLSM reads:
 | `BLSM_PORT` | `8080` | Web port |
 | `BLSM_ALLOWED_ORIGINS` | localhost Vite origins | Comma-separated development browser origins |
 | `BLSM_ADMIN_PASSWORD` | unset | Optional first-run bootstrap password (12+ chars) |
+| `BLSM_FRONTEND_DIR` | auto-detected | Built dashboard directory; production configures the active release automatically |
 
 For LAN use, access the production build from FastAPI on port 8080. Do not expose BLSM directly to the public internet. If remote access is needed, use a private VPN such as WireGuard or Tailscale and firewall port 8080 to the trusted interface.
 

@@ -49,6 +49,22 @@ class SecurityHeadersMiddleware:
         await self.app(scope, receive, send_with_headers)
 
 
+def find_frontend_dist(settings: Settings) -> Path | None:
+    """Locate the built dashboard in production and source checkouts."""
+    candidates = [settings.frontend_dir] if settings.frontend_dir else []
+    candidates.extend(
+        [
+            Path.cwd() / "frontend" / "dist",
+            Path(__file__).resolve().parents[2] / "frontend" / "dist",
+        ]
+    )
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if (resolved / "index.html").is_file():
+            return resolved
+    return None
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     current_settings = settings or Settings.from_env()
 
@@ -89,8 +105,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def websocket_console(websocket: WebSocket, server_id: str) -> None:
         await console_socket(websocket, server_id)
 
-    frontend_dist = Path(__file__).resolve().parents[2] / "frontend" / "dist"
-    if frontend_dist.is_dir():
+    frontend_dist = find_frontend_dist(current_settings)
+    if frontend_dist is not None:
         assets = frontend_dist / "assets"
         if assets.is_dir():
             app.mount("/assets", StaticFiles(directory=assets), name="assets")

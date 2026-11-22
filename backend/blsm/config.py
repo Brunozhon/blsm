@@ -13,10 +13,15 @@ class Settings:
     port: int
     allowed_origins: tuple[str, ...]
     admin_password: str | None
+    frontend_dir: Path | None = None
 
     @classmethod
     def from_env(cls) -> Settings:
         data_dir = Path(os.getenv("BLSM_DATA_DIR", "./data")).expanduser().resolve()
+        frontend_value = os.getenv("BLSM_FRONTEND_DIR")
+        frontend_dir = (
+            Path(frontend_value).expanduser().resolve() if frontend_value else None
+        )
         origins = tuple(
             value.strip()
             for value in os.getenv(
@@ -31,6 +36,7 @@ class Settings:
             port=int(os.getenv("BLSM_PORT", "8080")),
             allowed_origins=origins,
             admin_password=os.getenv("BLSM_ADMIN_PASSWORD"),
+            frontend_dir=frontend_dir,
         )
 
     @property

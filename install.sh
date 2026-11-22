@@ -350,10 +350,14 @@ BLSM_DATA_DIR=$DATA_DIR
 BLSM_HOST=$HOST
 BLSM_PORT=$PORT
 BLSM_ALLOWED_ORIGINS=
+BLSM_FRONTEND_DIR=$APP_ROOT/current/frontend/dist
 EOF
-    chown root:"$SERVICE_GROUP" "$env_file"
-    chmod 0640 "$env_file"
   fi
+  if ! grep -q '^BLSM_FRONTEND_DIR=' "$env_file"; then
+    printf 'BLSM_FRONTEND_DIR=%s/current/frontend/dist\n' "$APP_ROOT" >> "$env_file"
+  fi
+  chown root:"$SERVICE_GROUP" "$env_file"
+  chmod 0640 "$env_file"
 
   local release_file="$CONFIG_DIR/release.conf"
   if [[ -n "$REPOSITORY_URL" ]]; then
@@ -452,7 +456,9 @@ health_check() {
   local attempt
   for attempt in {1..30}; do
     if curl --fail --silent --max-time 2 \
-      "http://127.0.0.1:$PORT/api/health" | grep -q '"status":"ok"'; then
+        "http://127.0.0.1:$PORT/api/health" | grep -q '"status":"ok"' \
+      && curl --fail --silent --max-time 2 \
+        "http://127.0.0.1:$PORT/" | grep -q '<div id="root"></div>'; then
       return 0
     fi
     if systemctl is-failed --quiet "$SERVICE_NAME.service" 2>/dev/null; then

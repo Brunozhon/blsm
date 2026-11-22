@@ -4,6 +4,7 @@ from typing import Any
 
 from blsm.config import Settings
 from blsm.main import create_app
+from fastapi.responses import FileResponse
 
 
 async def request_json(
@@ -56,6 +57,30 @@ async def request_json(
         if message["type"] == "http.response.body"
     )
     return start["status"], json.loads(response_body)
+
+
+async def test_serves_configured_frontend_and_spa_fallback(tmp_path: Path) -> None:
+    frontend_dir = tmp_path / "frontend"
+    frontend_dir.mkdir()
+    (frontend_dir / "index.html").write_text('<div id="root"></div>')
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        host="127.0.0.1",
+        port=8080,
+        allowed_origins=(),
+        admin_password=None,
+        frontend_dir=frontend_dir,
+    )
+    app = create_app(settings)
+    spa_route = next(route for route in app.routes if route.path == "/{path:path}")
+
+    root_response = await spa_route.endpoint("")
+    fallback_response = await spa_route.endpoint("servers/example")
+
+    assert isinstance(root_response, FileResponse)
+    assert Path(root_response.path) == frontend_dir / "index.html"
+    assert isinstance(fallback_response, FileResponse)
+    assert Path(fallback_response.path) == frontend_dir / "index.html"
 
 
 async def test_first_run_auth_and_server_creation(tmp_path: Path) -> None:
