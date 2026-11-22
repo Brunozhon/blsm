@@ -37,6 +37,13 @@ import type { GameRule, InstalledMod, ModResult, PlayerState, Server, ServerSett
 
 type View = 'overview' | 'console' | 'mods' | 'players' | 'game-rules' | 'settings'
 
+function matchesSearch(query: string, fields: Array<string | number | boolean | null | undefined>) {
+  const terms = query.toLocaleLowerCase().match(/[a-z0-9]+/g) ?? []
+  if (terms.length === 0) return true
+  const searchable = fields.filter((field) => field !== null && field !== undefined).join(' ').toLocaleLowerCase()
+  return terms.every((term) => searchable.includes(term))
+}
+
 function App() {
   const [authenticated, setAuthenticated] = useState(Boolean(session.get()))
 
@@ -583,12 +590,17 @@ function GameRulesView({ server, setError }: { server: Server; setError: (error:
     }
   }
 
-  const normalizedQuery = query.trim().toLowerCase()
-  const filtered = rules.filter((rule) => !normalizedQuery
-    || rule.key.toLowerCase().includes(normalizedQuery)
-    || rule.label.toLowerCase().includes(normalizedQuery)
-    || rule.category.toLowerCase().includes(normalizedQuery)
-    || rule.description.toLowerCase().includes(normalizedQuery))
+  const filtered = rules.filter((rule) => matchesSearch(query, [
+    rule.key,
+    rule.label,
+    rule.category,
+    rule.description,
+    rule.type,
+    rule.default,
+    values[rule.key],
+    rule.type === 'boolean' && values[rule.key] === 'true' ? 'enabled' : undefined,
+    rule.type === 'boolean' && values[rule.key] === 'false' ? 'disabled' : undefined,
+  ]))
   const categories = Array.from(new Set(filtered.map((rule) => rule.category))).sort()
 
   return (
@@ -606,8 +618,8 @@ function GameRulesView({ server, setError }: { server: Server; setError: (error:
 
       <section className="panel">
         <div className="panel-header flex-wrap">
-          <div><h3 className="panel-title">World rules</h3><p className="panel-description">{rules.length} vanilla rules · available changes apply without a restart</p></div>
-          <div className="relative w-full sm:w-72"><Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-zinc-600" size={14} /><input className="input pl-9" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search game rules…" aria-label="Search game rules" /></div>
+          <div><h3 className="panel-title">World rules</h3><p className="panel-description">{query.trim() ? `${filtered.length} of ${rules.length} rules` : `${rules.length} vanilla rules`} · available changes apply without a restart</p></div>
+          <div className="relative w-full sm:w-72"><Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-zinc-600" size={14} /><input className="input px-9" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search game rules…" aria-label="Search game rules" />{query && <button className="absolute right-2 top-1/2 grid size-7 -translate-y-1/2 place-items-center rounded-md text-zinc-600 hover:bg-zinc-800 hover:text-zinc-300" type="button" onClick={() => setQuery('')} aria-label="Clear game rule search"><X size={13} /></button>}</div>
         </div>
         {loading && rules.length === 0 ? <div className="grid min-h-48 place-items-center text-sm text-zinc-600"><RefreshCw className="mb-3 animate-spin" size={18} />Loading game rules…</div> : filtered.length === 0 ? <p className="px-5 py-12 text-center text-sm text-zinc-600">No game rules match your search.</p> : (
           <div className="divide-y divide-zinc-800/80">
@@ -724,11 +736,14 @@ function SettingsView({ server, setError }: { server: Server; setError: (error: 
     setNewKey('')
   }
 
-  const normalizedQuery = query.trim().toLowerCase()
-  const filtered = settings.filter((setting) => !normalizedQuery
-    || setting.key.toLowerCase().includes(normalizedQuery)
-    || setting.category.toLowerCase().includes(normalizedQuery)
-    || setting.description?.toLowerCase().includes(normalizedQuery))
+  const filtered = settings.filter((setting) => matchesSearch(query, [
+    setting.key,
+    setting.category,
+    setting.description,
+    setting.type,
+    setting.secret ? undefined : values[setting.key],
+    ...(setting.options ?? []),
+  ]))
   const categories = Array.from(new Set(filtered.map((setting) => setting.category))).sort()
   const stopped = server.status !== 'running'
 
@@ -756,8 +771,8 @@ function SettingsView({ server, setError }: { server: Server; setError: (error: 
 
       <section className="panel">
         <div className="panel-header flex-wrap">
-          <div><h3 className="panel-title">Server properties</h3><p className="panel-description">{settings.length} properties · changes require a server restart</p></div>
-          <div className="relative w-full sm:w-72"><Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-zinc-600" size={14} /><input className="input pl-9" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search properties…" aria-label="Search server properties" /></div>
+          <div><h3 className="panel-title">Server properties</h3><p className="panel-description">{query.trim() ? `${filtered.length} of ${settings.length} properties` : `${settings.length} properties`} · changes require a server restart</p></div>
+          <div className="relative w-full sm:w-72"><Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-zinc-600" size={14} /><input className="input px-9" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search properties…" aria-label="Search server properties" />{query && <button className="absolute right-2 top-1/2 grid size-7 -translate-y-1/2 place-items-center rounded-md text-zinc-600 hover:bg-zinc-800 hover:text-zinc-300" type="button" onClick={() => setQuery('')} aria-label="Clear server property search"><X size={13} /></button>}</div>
         </div>
         {loading && settings.length === 0 ? <div className="grid min-h-48 place-items-center text-sm text-zinc-600"><RefreshCw className="mb-3 animate-spin" size={18} />Loading settings…</div> : filtered.length === 0 ? <p className="px-5 py-12 text-center text-sm text-zinc-600">No properties match your search.</p> : (
           <div className="divide-y divide-zinc-800/80">
