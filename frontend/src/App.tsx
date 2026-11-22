@@ -23,6 +23,7 @@ import {
   ShieldCheck,
   ShieldOff,
   Square,
+  SlidersHorizontal,
   Terminal,
   Trash2,
   UserMinus,
@@ -32,9 +33,9 @@ import {
 } from 'lucide-react'
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api, session } from './api'
-import type { InstalledMod, ModResult, PlayerState, Server, ServerSetting, Stats } from './types'
+import type { GameRule, InstalledMod, ModResult, PlayerState, Server, ServerSetting, Stats } from './types'
 
-type View = 'overview' | 'console' | 'mods' | 'players' | 'settings'
+type View = 'overview' | 'console' | 'mods' | 'players' | 'game-rules' | 'settings'
 
 function App() {
   const [authenticated, setAuthenticated] = useState(Boolean(session.get()))
@@ -239,6 +240,9 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
               {selected.capabilities.some((capability) => ['players', 'whitelist', 'operators'].includes(capability)) && (
                 <button className={`nav-item ${view === 'players' ? 'nav-active' : ''}`} onClick={() => { setView('players'); setSidebarOpen(false) }}><Users size={17} /> Players</button>
               )}
+              {selected.capabilities.includes('game_rules') && (
+                <button className={`nav-item ${view === 'game-rules' ? 'nav-active' : ''}`} onClick={() => { setView('game-rules'); setSidebarOpen(false) }}><SlidersHorizontal size={17} /> Game Rules</button>
+              )}
               {selected.capabilities.includes('settings') && (
                 <button className={`nav-item ${view === 'settings' ? 'nav-active' : ''}`} onClick={() => { setView('settings'); setSidebarOpen(false) }}><Settings size={17} /> Settings</button>
               )}
@@ -289,6 +293,8 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
             <ModsView server={selected} setError={setError} />
           ) : view === 'players' ? (
             <PlayersView server={selected} setError={setError} />
+          ) : view === 'game-rules' ? (
+            <GameRulesView server={selected} setError={setError} />
           ) : view === 'settings' ? (
             <SettingsView server={selected} setError={setError} />
           ) : view === 'console' ? (
@@ -500,6 +506,144 @@ function PlayerPanel({ title, description, icon, empty, players, online = [], ch
       <div className="panel-header"><div><h3 className="panel-title flex items-center gap-2">{icon}{title}</h3><p className="panel-description">{description}</p></div><span className="text-xs text-zinc-600">{players.length}</span></div>
       {players.length === 0 ? <p className="px-5 py-8 text-center text-sm text-zinc-600">{empty}</p> : <div className="divide-y divide-zinc-800/70">{players.map((player) => <div key={player.toLowerCase()} className="flex items-center gap-3 px-4 py-3"><div className="grid size-8 place-items-center rounded-lg border border-zinc-800 bg-zinc-900 text-xs font-medium text-zinc-400">{player.slice(0, 1).toUpperCase()}</div><div className="min-w-0 flex-1"><p className="truncate text-sm text-zinc-200">{player}</p>{onlineNames.has(player.toLowerCase()) && <p className="mt-0.5 flex items-center gap-1.5 text-[11px] text-emerald-400"><span className="status-dot bg-emerald-400" />Online</p>}</div>{children(player)}</div>)}</div>}
     </section>
+  )
+}
+
+function GameRulesView({ server, setError }: { server: Server; setError: (error: string) => void }) {
+  const [rules, setRules] = useState<GameRule[]>([])
+  const [values, setValues] = useState<Record<string, string>>({})
+  const [originals, setOriginals] = useState<Record<string, string>>({})
+  const [online, setOnline] = useState(false)
+  const [query, setQuery] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [notice, setNotice] = useState('')
+
+  const applyDocument = useCallback((items: GameRule[], isOnline: boolean) => {
+    const serialized = Object.fromEntries(items.map((rule) => [
+      rule.key,
+      rule.value === null ? '' : String(rule.value),
+    ]))
+    setRules(items)
+    setValues(serialized)
+    setOriginals(serialized)
+    setOnline(isOnline)
+  }, [])
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    try {
+      const document = await api.gameRules(server.id)
+      applyDocument(document.rules, document.online)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Could not load game rules')
+    } finally {
+      setLoading(false)
+    }
+  }, [applyDocument, server.id, setError])
+
+  useEffect(() => { void load() }, [load, server.status])
+
+  const dirtyRules = rules.filter((rule) => rule.available && values[rule.key] !== originals[rule.key])
+
+  async function save() {
+    const updates: Record<string, boolean | number> = {}
+    for (const rule of dirtyRules) {
+      const raw = values[rule.key]
+      if (rule.type === 'boolean') {
+        updates[rule.key] = raw === 'true'
+        continue
+      }
+      const number = Number(raw)
+      if (!Number.isInteger(number)) {
+        setError(`${rule.label} must be a whole number.`)
+        return
+      }
+      if (rule.min !== undefined && number < rule.min) {
+        setError(`${rule.label} must be at least ${rule.min}.`)
+        return
+      }
+      if (rule.max !== undefined && number > rule.max) {
+        setError(`${rule.label} must be at most ${rule.max}.`)
+        return
+      }
+      updates[rule.key] = number
+    }
+    if (Object.keys(updates).length === 0) return
+    setSaving(true)
+    setNotice('')
+    try {
+      const document = await api.updateGameRules(server.id, updates)
+      applyDocument(document.rules, document.online)
+      setNotice('Game rules updated. Changes are active immediately and saved with the world.')
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Could not update game rules')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const normalizedQuery = query.trim().toLowerCase()
+  const filtered = rules.filter((rule) => !normalizedQuery
+    || rule.key.toLowerCase().includes(normalizedQuery)
+    || rule.label.toLowerCase().includes(normalizedQuery)
+    || rule.category.toLowerCase().includes(normalizedQuery)
+    || rule.description.toLowerCase().includes(normalizedQuery))
+  const categories = Array.from(new Set(filtered.map((rule) => rule.category))).sort()
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+        <div><h2 className="page-title">Game Rules</h2><p className="page-subtitle">Live world behavior · complete Minecraft 26.3 rule catalog.</p></div>
+        <div className="flex gap-2">
+          <button className="btn-secondary" type="button" disabled={loading || saving} onClick={() => void load()}><RefreshCw size={14} className={loading ? 'animate-spin' : ''} /> Refresh</button>
+          <button className="btn-primary" type="button" disabled={!online || saving || dirtyRules.length === 0} onClick={() => void save()}><Save size={14} /> {saving ? 'Saving…' : `Apply${dirtyRules.length ? ` (${dirtyRules.length})` : ''}`}</button>
+        </div>
+      </div>
+
+      {!online && <div className="rounded-xl border border-amber-500/20 bg-amber-500/[0.045] px-4 py-3 text-sm text-amber-200/80">Start the server to load and change its current game rules. Rule descriptions and defaults remain available while offline.</div>}
+      {notice && <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/[0.045] px-4 py-3 text-sm text-emerald-300/80">{notice}</div>}
+
+      <section className="panel">
+        <div className="panel-header flex-wrap">
+          <div><h3 className="panel-title">World rules</h3><p className="panel-description">{rules.length} vanilla rules · available changes apply without a restart</p></div>
+          <div className="relative w-full sm:w-72"><Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-zinc-600" size={14} /><input className="input pl-9" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search game rules…" aria-label="Search game rules" /></div>
+        </div>
+        {loading && rules.length === 0 ? <div className="grid min-h-48 place-items-center text-sm text-zinc-600"><RefreshCw className="mb-3 animate-spin" size={18} />Loading game rules…</div> : filtered.length === 0 ? <p className="px-5 py-12 text-center text-sm text-zinc-600">No game rules match your search.</p> : (
+          <div className="divide-y divide-zinc-800/80">
+            {categories.map((category) => (
+              <div key={category} className="p-5">
+                <p className="section-label mb-4">{category}</p>
+                <div className="grid gap-x-8 gap-y-5 xl:grid-cols-2">
+                  {filtered.filter((rule) => rule.category === category).map((rule) => (
+                    <GameRuleField key={rule.key} rule={rule} value={values[rule.key] ?? ''} online={online} disabled={!online || !rule.available || saving} changed={dirtyRules.includes(rule)} onChange={(value) => {
+                      setValues((current) => ({ ...current, [rule.key]: value }))
+                      setNotice('')
+                    }} />
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+    </div>
+  )
+}
+
+function GameRuleField({ rule, value, online, disabled, changed, onChange }: { rule: GameRule; value: string; online: boolean; disabled: boolean; changed: boolean; onChange: (value: string) => void }) {
+  const id = `game-rule-${rule.key.replace(':', '-')}`
+  return (
+    <label htmlFor={id} className="block min-w-0">
+      <span className="mb-1 flex items-center gap-2"><span className="text-sm font-medium text-zinc-300">{rule.label}</span>{changed && <span className="rounded border border-blue-500/20 bg-blue-500/10 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-blue-300">Changed</span>}{online && !rule.available && <span className="rounded border border-zinc-700 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-zinc-500">Unavailable</span>}</span>
+      <code className="mb-2 block break-all text-[11px] text-zinc-600">{rule.key}</code>
+      {rule.type === 'boolean' ? (
+        <select id={id} className="input" disabled={disabled} value={value} onChange={(event) => onChange(event.target.value)}>{value === '' && <option value="">Current value unavailable</option>}<option value="true">Enabled</option><option value="false">Disabled</option></select>
+      ) : (
+        <input id={id} className="input" disabled={disabled} type="number" min={rule.min} max={rule.max} step={1} value={value} onChange={(event) => onChange(event.target.value)} placeholder={!online ? `Default: ${rule.default}` : undefined} />
+      )}
+      <span className="mt-2 block text-xs leading-5 text-zinc-600">{rule.description} Default: {String(rule.default)}.</span>
+    </label>
   )
 }
 

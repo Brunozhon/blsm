@@ -5,6 +5,10 @@ from typing import Any
 import pytest
 from blsm.adapters import minecraft
 from blsm.adapters.minecraft import MinecraftFabricAdapter
+from blsm.adapters.minecraft_game_rules import (
+    GAME_RULE_METADATA_VERSION,
+    MINECRAFT_GAME_RULES,
+)
 from blsm.adapters.minecraft_properties import (
     MINECRAFT_26_3_PROPERTY_NAMES,
     PROPERTY_METADATA,
@@ -30,6 +34,14 @@ def test_property_descriptions_cover_minecraft_26_3() -> None:
         for key in MINECRAFT_26_3_PROPERTY_NAMES
     )
     assert "Obsolete in 26.3" in PROPERTY_METADATA["pvp"]["description"]
+
+
+def test_game_rule_catalog_covers_minecraft_26_3() -> None:
+    assert GAME_RULE_METADATA_VERSION == "26.3"
+    assert len(MINECRAFT_GAME_RULES) == 59
+    assert all(rule["description"] for rule in MINECRAFT_GAME_RULES.values())
+    assert MINECRAFT_GAME_RULES["minecraft:random_tick_speed"]["type"] == "integer"
+    assert MINECRAFT_GAME_RULES["minecraft:pvp"]["type"] == "boolean"
 
 
 def test_rejects_java_runtime_that_is_too_old(monkeypatch: Any) -> None:
@@ -169,4 +181,71 @@ async def test_rejects_unsafe_player_name_before_rcon(
 
     with pytest.raises(RuntimeError, match="letters, numbers, and underscores"):
         await adapter.set_operator(tmp_path, {}, "Alex stop", True)
+    assert called is False
+
+
+async def test_queries_and_updates_game_rules_over_batched_rcon(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    batches: list[list[str]] = []
+    adapter = MinecraftFabricAdapter()
+
+    async def commands(
+        path: Path, config: dict[str, Any], values: list[str]
+    ) -> list[str]:
+        batches.append(values)
+        responses: list[str] = []
+        for command in values:
+            key = command.split()[1]
+            metadata = MINECRAFT_GAME_RULES[key]
+            value = command.split()[2] if len(command.split()) == 3 else str(
+                metadata["default"]
+            ).lower()
+            responses.append(f"Game rule {key} is currently set to {value}")
+        return responses
+
+    monkeypatch.setattr(adapter, "send_commands", commands)
+
+    rules = await adapter.game_rules(tmp_path, {}, True)
+    assert len(rules) == 59
+    assert all(rule["available"] for rule in rules)
+    pvp = next(rule for rule in rules if rule["key"] == "minecraft:pvp")
+    assert pvp["value"] is True
+
+    updated = await adapter.update_game_rules(
+        tmp_path,
+        {},
+        {"minecraft:pvp": False, "minecraft:random_tick_speed": 6},
+    )
+    assert batches[-2] == [
+        "gamerule minecraft:pvp false",
+        "gamerule minecraft:random_tick_speed 6",
+    ]
+    assert len(batches[-1]) == 59
+    assert len(updated) == 59
+
+
+async def test_rejects_invalid_game_rule_updates(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    adapter = MinecraftFabricAdapter()
+    called = False
+
+    async def commands(
+        path: Path, config: dict[str, Any], values: list[str]
+    ) -> list[str]:
+        nonlocal called
+        called = True
+        return values
+
+    monkeypatch.setattr(adapter, "send_commands", commands)
+
+    with pytest.raises(ValueError, match="Unknown Minecraft"):
+        await adapter.update_game_rules(tmp_path, {}, {"minecraft:not_real": True})
+    with pytest.raises(ValueError, match="true or false"):
+        await adapter.update_game_rules(tmp_path, {}, {"minecraft:pvp": 1})
+    with pytest.raises(ValueError, match="at least 0"):
+        await adapter.update_game_rules(
+            tmp_path, {}, {"minecraft:random_tick_speed": -1}
+        )
     assert called is False

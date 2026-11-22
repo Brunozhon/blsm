@@ -28,7 +28,7 @@ async def _write_packet(
     await writer.drain()
 
 
-async def command(host: str, port: int, password: str, text: str) -> str:
+async def commands(host: str, port: int, password: str, texts: list[str]) -> list[str]:
     try:
         reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=3)
     except (TimeoutError, OSError) as exc:
@@ -38,12 +38,19 @@ async def command(host: str, port: int, password: str, text: str) -> str:
         auth_id, _, _ = await asyncio.wait_for(_read_packet(reader), timeout=3)
         if auth_id == -1:
             raise RconError("RCON authentication failed")
-        await _write_packet(writer, 2, 2, text)
-        response_id, _, response = await asyncio.wait_for(_read_packet(reader), timeout=3)
-        if response_id != 2:
-            raise RconError("Unexpected RCON response")
-        return response
+        responses: list[str] = []
+        for request_id, text in enumerate(texts, start=2):
+            await _write_packet(writer, request_id, 2, text)
+            response_id, _, response = await asyncio.wait_for(_read_packet(reader), timeout=3)
+            if response_id != request_id:
+                raise RconError("Unexpected RCON response")
+            responses.append(response)
+        return responses
     finally:
         writer.close()
         await writer.wait_closed()
+
+
+async def command(host: str, port: int, password: str, text: str) -> str:
+    return (await commands(host, port, password, [text]))[0]
 

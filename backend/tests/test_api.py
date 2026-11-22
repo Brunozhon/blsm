@@ -121,6 +121,7 @@ async def test_first_run_auth_and_server_creation(tmp_path: Path) -> None:
         assert body["status"] == "not_installed"
         assert "mods" in body["capabilities"]
         assert "settings" in body["capabilities"]
+        assert "game_rules" in body["capabilities"]
         assert "rcon_password" not in body["config"]
 
         server_path = next((tmp_path / "servers").iterdir())
@@ -154,6 +155,25 @@ async def test_first_run_auth_and_server_creation(tmp_path: Path) -> None:
         refreshed = app.state.db.get_server(body["id"])
         assert refreshed is not None
         assert refreshed["config"]["server_port"] == 25570
+
+        rules_status, rules = await request_json(
+            app,
+            "GET",
+            f"/api/servers/{body['id']}/game-rules",
+            headers={"Authorization": f"Bearer {setup['token']}"},
+        )
+        assert rules_status == 200
+        assert rules["online"] is False
+        assert len(rules["rules"]) == 59
+        rule_update_status, rule_update = await request_json(
+            app,
+            "PUT",
+            f"/api/servers/{body['id']}/game-rules",
+            {"values": {"minecraft:pvp": False}},
+            {"Authorization": f"Bearer {setup['token']}"},
+        )
+        assert rule_update_status == 409
+        assert rule_update["detail"] == "Start the server to change game rules"
         player_status, players = await request_json(
             app,
             "GET",

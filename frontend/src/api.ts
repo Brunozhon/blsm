@@ -1,4 +1,4 @@
-import type { InstalledMod, ModResult, PlayerState, Server, ServerSettings, Stats } from './types'
+import type { GameRules, InstalledMod, ModResult, PlayerState, Server, ServerSettings, Stats } from './types'
 
 const TOKEN_KEY = 'blsm_session'
 
@@ -67,6 +67,12 @@ export const api = {
   settings: (id: string) => request<ServerSettings>(`/servers/${id}/settings`),
   updateSettings: (id: string, values: Record<string, string>) =>
     request<ServerSettings>(`/servers/${id}/settings`, {
+      method: 'PUT',
+      body: JSON.stringify({ values }),
+    }),
+  gameRules: (id: string) => request<GameRules>(`/servers/${id}/game-rules`),
+  updateGameRules: (id: string, values: Record<string, boolean | number>) =>
+    request<GameRules>(`/servers/${id}/game-rules`, {
       method: 'PUT',
       body: JSON.stringify({ values }),
     }),

@@ -21,6 +21,7 @@ from .adapters.base import AdapterCapability
 from .auth import hash_password, require_admin, verify_password
 from .schemas import (
     ConsoleCommand,
+    GameRulesUpdate,
     ModInstall,
     PasswordPayload,
     PlayerAccess,
@@ -182,13 +183,64 @@ async def server_stats(request: Request, server_id: str) -> dict[str, Any]:
     return request.app.state.processes.stats(_server_or_404(request, server_id))
 
 
-def _settings_adapter(request: Request, server: dict[str, Any]) -> Any:
+def _capability_adapter(
+    request: Request,
+    server: dict[str, Any],
+    capability: AdapterCapability,
+    detail: str,
+) -> Any:
     adapter = request.app.state.adapters[server["adapter"]]
-    if AdapterCapability.SETTINGS not in adapter.capabilities:
-        raise HTTPException(
-            status_code=404, detail="This server does not expose editable settings"
-        )
+    if capability not in adapter.capabilities:
+        raise HTTPException(status_code=404, detail=detail)
     return adapter
+
+
+@router.get("/servers/{server_id}/game-rules", dependencies=[Depends(require_admin)])
+async def game_rules(request: Request, server_id: str) -> dict[str, Any]:
+    server = _server_or_404(request, server_id)
+    adapter = _capability_adapter(
+        request,
+        server,
+        AdapterCapability.GAME_RULES,
+        "This server does not expose game rules",
+    )
+    running = request.app.state.processes.status(server) == "running"
+    try:
+        rules = await adapter.game_rules(Path(server["path"]), server["config"], running)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {"rules": rules, "online": running}
+
+
+@router.put("/servers/{server_id}/game-rules", dependencies=[Depends(require_admin)])
+async def update_game_rules(
+    request: Request, server_id: str, payload: GameRulesUpdate
+) -> dict[str, Any]:
+    server = _server_or_404(request, server_id)
+    adapter = _capability_adapter(
+        request,
+        server,
+        AdapterCapability.GAME_RULES,
+        "This server does not expose game rules",
+    )
+    if request.app.state.processes.status(server) != "running":
+        raise HTTPException(status_code=409, detail="Start the server to change game rules")
+    try:
+        rules = await adapter.update_game_rules(
+            Path(server["path"]), server["config"], payload.values
+        )
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"rules": rules, "online": True}
+
+
+def _settings_adapter(request: Request, server: dict[str, Any]) -> Any:
+    return _capability_adapter(
+        request,
+        server,
+        AdapterCapability.SETTINGS,
+        "This server does not expose editable settings",
+    )
 
 
 def _settings_view(adapter: Any, server: dict[str, Any]) -> dict[str, Any]:

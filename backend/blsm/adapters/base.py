@@ -91,6 +91,18 @@ class ServerAdapter(ABC):
         """Persist settings and return the normalized adapter configuration."""
         raise NotImplementedError("This server adapter does not expose settings")
 
+    async def game_rules(
+        self, path: Path, config: dict[str, Any], query_values: bool
+    ) -> list[dict[str, Any]]:
+        """Return adapter-described game rules and, when available, live values."""
+        raise NotImplementedError("This server adapter does not expose game rules")
+
+    async def update_game_rules(
+        self, path: Path, config: dict[str, Any], values: dict[str, bool | int]
+    ) -> list[dict[str, Any]]:
+        """Apply game rules and return refreshed adapter-normalized state."""
+        raise NotImplementedError("This server adapter does not expose game rules")
+
     def public_metadata(self) -> dict[str, Any]:
         return {
             "key": self.key,

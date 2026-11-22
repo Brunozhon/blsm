@@ -49,6 +49,24 @@ export interface ServerSettings {
   restart_required: boolean
 }
 
+export interface GameRule {
+  key: string
+  label: string
+  description: string
+  category: string
+  type: 'boolean' | 'integer'
+  value: boolean | number | null
+  default: boolean | number
+  min?: number
+  max?: number
+  available: boolean
+}
+
+export interface GameRules {
+  rules: GameRule[]
+  online: boolean
+}
+
 export interface ModResult {
   project_id: string
   slug: string

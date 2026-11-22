@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, StrictBool, StrictInt, field_validator
 
 
 class PasswordPayload(BaseModel):
@@ -49,6 +49,24 @@ class ServerSettingsUpdate(BaseModel):
                 raise ValueError(f"Invalid setting name: {key}")
             if len(value) > 8192 or any(character in value for character in "\r\n\x00"):
                 raise ValueError(f"Invalid value for setting: {key}")
+        return values
+
+
+class GameRulesUpdate(BaseModel):
+    values: dict[str, StrictBool | StrictInt]
+
+    @field_validator("values")
+    @classmethod
+    def validate_values(cls, values: dict[str, bool | int]) -> dict[str, bool | int]:
+        if not values:
+            raise ValueError("At least one game rule must be provided")
+        if len(values) > 128:
+            raise ValueError("Too many game rules in one update")
+        for key in values:
+            if not 1 <= len(key) <= 128 or not all(
+                character.isalnum() or character in "._:-" for character in key
+            ):
+                raise ValueError(f"Invalid game rule name: {key}")
         return values
 
 

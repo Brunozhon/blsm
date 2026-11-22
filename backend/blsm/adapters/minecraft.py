@@ -14,6 +14,7 @@ import httpx
 
 from . import rcon
 from .base import AdapterCapability, ServerAdapter
+from .minecraft_game_rules import MINECRAFT_GAME_RULES
 from .minecraft_properties import PROPERTY_METADATA, SECRET_PROPERTIES
 
 FABRIC_META = "https://meta.fabricmc.net/v2"
@@ -167,6 +168,17 @@ class MinecraftFabricAdapter(ServerAdapter):
             command,
         )
 
+    async def send_commands(
+        self, path: Path, config: dict[str, Any], commands: list[str]
+    ) -> list[str]:
+        del path
+        return await rcon.commands(
+            "127.0.0.1",
+            int(config["rcon_port"]),
+            str(config["rcon_password"]),
+            commands,
+        )
+
     async def player_state(
         self, path: Path, config: dict[str, Any], query_online: bool
     ) -> dict[str, Any]:
@@ -261,6 +273,44 @@ class MinecraftFabricAdapter(ServerAdapter):
             normalized["rcon_password"] = values["rcon.password"]
         return normalized
 
+    async def game_rules(
+        self, path: Path, config: dict[str, Any], query_values: bool
+    ) -> list[dict[str, Any]]:
+        result = [
+            {"key": key, **metadata, "value": None, "available": False}
+            for key, metadata in MINECRAFT_GAME_RULES.items()
+        ]
+        if not query_values:
+            return result
+        responses = await self.send_commands(
+            path,
+            config,
+            [f"gamerule {rule['key']}" for rule in result],
+        )
+        for rule, response in zip(result, responses, strict=True):
+            value = self._parse_game_rule_value(response, rule["type"])
+            if value is not None:
+                rule["value"] = value
+                rule["available"] = True
+        return result
+
+    async def update_game_rules(
+        self, path: Path, config: dict[str, Any], values: dict[str, bool | int]
+    ) -> list[dict[str, Any]]:
+        commands: list[str] = []
+        for key, value in values.items():
+            metadata = MINECRAFT_GAME_RULES.get(key)
+            if metadata is None:
+                raise ValueError(f"Unknown Minecraft 26.3 game rule: {key}")
+            self._validate_game_rule(key, metadata, value)
+            serialized = str(value).lower() if isinstance(value, bool) else str(value)
+            commands.append(f"gamerule {key} {serialized}")
+        responses = await self.send_commands(path, config, commands)
+        for response in responses:
+            if self._parse_game_rule_value(response, None) is None:
+                raise RuntimeError(f"Minecraft rejected a game rule update: {response}")
+        return await self.game_rules(path, config, True)
+
     def is_installed(self, path: Path) -> bool:
         return (path / "fabric-server-launch.jar").is_file()
 
@@ -297,6 +347,35 @@ class MinecraftFabricAdapter(ServerAdapter):
                 raise ValueError(f"{key} must be at least {metadata['min']}")
             if metadata.get("max") is not None and number > metadata["max"]:
                 raise ValueError(f"{key} must be at most {metadata['max']}")
+
+    @staticmethod
+    def _parse_game_rule_value(response: str, kind: str | None) -> bool | int | None:
+        cleaned = re.sub(r"§.", "", response).strip()
+        matches = re.findall(r"(?<![\w-])(true|false|-?\d+)(?![\w-])", cleaned)
+        if not matches:
+            return None
+        value = matches[-1]
+        if kind == "boolean" or (kind is None and value in {"true", "false"}):
+            return value == "true"
+        try:
+            return int(value)
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _validate_game_rule(
+        key: str, metadata: dict[str, Any], value: bool | int
+    ) -> None:
+        if metadata["type"] == "boolean":
+            if type(value) is not bool:
+                raise ValueError(f"{key} must be true or false")
+            return
+        if type(value) is not int:
+            raise ValueError(f"{key} must be a whole number")
+        if value < metadata["min"]:
+            raise ValueError(f"{key} must be at least {metadata['min']}")
+        if metadata.get("max") is not None and value > metadata["max"]:
+            raise ValueError(f"{key} must be at most {metadata['max']}")
 
     @staticmethod
     def _validate_player_name(name: str) -> str:
