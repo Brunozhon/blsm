@@ -25,18 +25,18 @@ The installer supplies Python, Node.js 20, Java 21, and the other required syste
 
 ## Production installation
 
-Clone the repository or unpack a release, then run the installer once:
+Run the installer directly from GitHub:
 
 ```bash
-git clone <your-repository-url> blsm
-cd blsm
-sudo ./install.sh
+curl -fsSL https://raw.githubusercontent.com/Brunozhon/blsm/main/install.sh | sudo bash
 ```
 
-If the source directory is not a Git checkout, provide the repository used for future updates:
+The script installs Git first and automatically clones `https://github.com/Brunozhon/blsm`. To install from an existing checkout instead, run its local copy:
 
 ```bash
-sudo ./install.sh --repo https://github.com/OWNER/blsm.git
+git clone https://github.com/Brunozhon/blsm
+cd blsm
+sudo ./install.sh
 ```
 
 The script is safe to rerun. It preserves existing configuration and data, creates a new application release, and rolls back the application symlink if the health check fails. It automatically:
@@ -54,7 +54,7 @@ Open `http://SERVER_LAN_IP:8080` and create the administrator password. No manua
 Installer options:
 
 ```text
---repo URL       Git repository used by future updates
+--repo URL       Alternate repository to install and use for updates
 --host ADDRESS   Dashboard listen address (default 0.0.0.0)
 --port PORT      Dashboard port (default 8080)
 ```
@@ -81,7 +81,7 @@ sudo blsm-update --check
 sudo blsm-update --version v0.2.0
 
 # Configure or replace the saved repository URL
-sudo blsm-update --repo https://github.com/OWNER/blsm.git
+sudo blsm-update --repo https://github.com/Brunozhon/blsm
 ```
 
 Backups are stored in `/var/backups/blsm/<UTC timestamp>/` and contain:

@@ -6,13 +6,20 @@ umask 027
 APP_ROOT="${BLSM_INSTALL_DIR:-/opt/blsm}"
 DATA_DIR="${BLSM_DATA_DIR:-/var/lib/blsm}"
 CONFIG_DIR="${BLSM_CONFIG_DIR:-/etc/blsm}"
+DEFAULT_REPOSITORY_URL="https://github.com/Brunozhon/blsm"
 SERVICE_NAME="blsm"
 SERVICE_USER="blsm"
 SERVICE_GROUP="blsm"
 HOST="0.0.0.0"
 PORT="8080"
-REPOSITORY_URL="${BLSM_REPOSITORY_URL:-}"
-SOURCE_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+REPOSITORY_URL="${BLSM_REPOSITORY_URL:-$DEFAULT_REPOSITORY_URL}"
+SCRIPT_PATH="${BASH_SOURCE[0]:-}"
+if [[ -n "$SCRIPT_PATH" && -f "$SCRIPT_PATH" ]]; then
+  SOURCE_DIR="$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd -P)"
+else
+  SOURCE_DIR="$PWD"
+fi
+SOURCE_TEMP=""
 STAGING_DIR=""
 
 log() { printf '[BLSM] %s\n' "$*"; }
@@ -24,7 +31,7 @@ usage() {
 Usage: sudo ./install.sh [options]
 
 Options:
-  --repo URL       Git repository used by future one-command updates.
+  --repo URL       Repository to install and use for updates.
   --host ADDRESS   Listen address (default: 0.0.0.0).
   --port PORT      Dashboard port (default: 8080).
   --help           Show this help.
@@ -38,6 +45,9 @@ cleanup() {
   local status=$?
   if [[ -n "$STAGING_DIR" && -d "$STAGING_DIR" ]]; then
     rm -rf -- "$STAGING_DIR"
+  fi
+  if [[ -n "$SOURCE_TEMP" && -d "$SOURCE_TEMP" ]]; then
+    rm -rf -- "$SOURCE_TEMP"
   fi
   exit "$status"
 }
@@ -74,18 +84,12 @@ for managed_path in "$APP_ROOT" "$DATA_DIR" "$CONFIG_DIR"; do
   [[ "$managed_path" == /* && "$managed_path" != "/" ]] \
     || die "Managed directories must be absolute paths other than /: $managed_path"
 done
-[[ -f "$SOURCE_DIR/pyproject.toml" && -f "$SOURCE_DIR/frontend/package.json" ]] || die 'Run install.sh from a complete BLSM source release'
-
 if [[ -r /etc/os-release ]]; then
   # shellcheck disable=SC1091
   . /etc/os-release
   [[ "${ID:-}" == "ubuntu" ]] || die 'This installer currently supports Ubuntu Server only'
 else
   die 'Unable to identify this operating system'
-fi
-
-if [[ -z "$REPOSITORY_URL" ]] && command -v git >/dev/null 2>&1; then
-  REPOSITORY_URL="$(git -C "$SOURCE_DIR" remote get-url origin 2>/dev/null || true)"
 fi
 
 install_system_dependencies() {
@@ -95,6 +99,36 @@ install_system_dependencies() {
   apt-get install -y --no-install-recommends \
     ca-certificates curl git gnupg \
     python3 python3-venv rsync util-linux
+}
+
+prepare_source() {
+  if [[ -f "$SOURCE_DIR/pyproject.toml" && -f "$SOURCE_DIR/frontend/package.json" ]]; then
+    log "Using the local BLSM source at $SOURCE_DIR"
+    return
+  fi
+
+  log "Cloning BLSM from $REPOSITORY_URL"
+  SOURCE_TEMP="$(mktemp -d /tmp/blsm-install.XXXXXX)"
+  local remote_tags release_ref
+  remote_tags="$(git ls-remote --tags --refs -- "$REPOSITORY_URL")"
+  release_ref="$(
+    printf '%s\n' "$remote_tags" \
+      | awk '{sub("refs/tags/", "", $2); print $2}' \
+      | { grep -E '^v?[0-9]+([.][0-9]+){1,3}$' || true; } \
+      | sort -V \
+      | tail -n 1
+  )"
+  if [[ -n "$release_ref" ]]; then
+    log "Installing release $release_ref"
+    git clone --depth 1 --branch "$release_ref" -- \
+      "$REPOSITORY_URL" "$SOURCE_TEMP/source"
+  else
+    log 'No versioned release tags found; installing the default branch'
+    git clone --depth 1 -- "$REPOSITORY_URL" "$SOURCE_TEMP/source"
+  fi
+  SOURCE_DIR="$SOURCE_TEMP/source"
+  [[ -f "$SOURCE_DIR/pyproject.toml" && -f "$SOURCE_DIR/frontend/package.json" ]] \
+    || die 'The cloned repository is not a complete BLSM source release'
 }
 
 java_major() {
@@ -277,6 +311,7 @@ health_check() {
 }
 
 install_system_dependencies
+prepare_source
 ensure_java
 ensure_node
 create_service_account
