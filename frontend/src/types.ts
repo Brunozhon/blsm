@@ -31,6 +31,24 @@ export interface PlayerState {
   operators: string[]
 }
 
+export interface ServerSetting {
+  key: string
+  value: string
+  configured: boolean
+  type: 'string' | 'boolean' | 'integer' | 'select' | 'secret'
+  description?: string | null
+  category: string
+  options?: string[] | null
+  min?: number | null
+  max?: number | null
+  secret: boolean
+}
+
+export interface ServerSettings {
+  settings: ServerSetting[]
+  restart_required: boolean
+}
+
 export interface ModResult {
   project_id: string
   slug: string

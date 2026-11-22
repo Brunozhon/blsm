@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class PasswordPayload(BaseModel):
@@ -30,6 +30,26 @@ class PlayerAccess(BaseModel):
 
 class WhitelistSetting(BaseModel):
     enabled: bool
+
+
+class ServerSettingsUpdate(BaseModel):
+    values: dict[str, str]
+
+    @field_validator("values")
+    @classmethod
+    def validate_values(cls, values: dict[str, str]) -> dict[str, str]:
+        if not values:
+            raise ValueError("At least one setting must be provided")
+        if len(values) > 256:
+            raise ValueError("Too many settings in one update")
+        for key, value in values.items():
+            if not 1 <= len(key) <= 128 or not all(
+                character.isalnum() or character in "._-" for character in key
+            ):
+                raise ValueError(f"Invalid setting name: {key}")
+            if len(value) > 8192 or any(character in value for character in "\r\n\x00"):
+                raise ValueError(f"Invalid value for setting: {key}")
+        return values
 
 
 class ModInstall(BaseModel):

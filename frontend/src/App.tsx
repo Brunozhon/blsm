@@ -15,6 +15,7 @@ import {
   Play,
   Plus,
   RefreshCw,
+  Save,
   Search,
   ServerIcon,
   Settings,
@@ -31,9 +32,9 @@ import {
 } from 'lucide-react'
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api, session } from './api'
-import type { InstalledMod, ModResult, PlayerState, Server, Stats } from './types'
+import type { InstalledMod, ModResult, PlayerState, Server, ServerSetting, Stats } from './types'
 
-type View = 'overview' | 'console' | 'mods' | 'players'
+type View = 'overview' | 'console' | 'mods' | 'players' | 'settings'
 
 function App() {
   const [authenticated, setAuthenticated] = useState(Boolean(session.get()))
@@ -238,7 +239,9 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
               {selected.capabilities.some((capability) => ['players', 'whitelist', 'operators'].includes(capability)) && (
                 <button className={`nav-item ${view === 'players' ? 'nav-active' : ''}`} onClick={() => { setView('players'); setSidebarOpen(false) }}><Users size={17} /> Players</button>
               )}
-              <button disabled className="nav-item opacity-45"><Settings size={17} /> Settings <span className="ml-auto text-[10px]">Soon</span></button>
+              {selected.capabilities.includes('settings') && (
+                <button className={`nav-item ${view === 'settings' ? 'nav-active' : ''}`} onClick={() => { setView('settings'); setSidebarOpen(false) }}><Settings size={17} /> Settings</button>
+              )}
             </div>
           )}
         </nav>
@@ -286,6 +289,8 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
             <ModsView server={selected} setError={setError} />
           ) : view === 'players' ? (
             <PlayersView server={selected} setError={setError} />
+          ) : view === 'settings' ? (
+            <SettingsView server={selected} setError={setError} />
           ) : view === 'console' ? (
             <ConsoleView server={selected} full />
           ) : (
@@ -495,6 +500,167 @@ function PlayerPanel({ title, description, icon, empty, players, online = [], ch
       <div className="panel-header"><div><h3 className="panel-title flex items-center gap-2">{icon}{title}</h3><p className="panel-description">{description}</p></div><span className="text-xs text-zinc-600">{players.length}</span></div>
       {players.length === 0 ? <p className="px-5 py-8 text-center text-sm text-zinc-600">{empty}</p> : <div className="divide-y divide-zinc-800/70">{players.map((player) => <div key={player.toLowerCase()} className="flex items-center gap-3 px-4 py-3"><div className="grid size-8 place-items-center rounded-lg border border-zinc-800 bg-zinc-900 text-xs font-medium text-zinc-400">{player.slice(0, 1).toUpperCase()}</div><div className="min-w-0 flex-1"><p className="truncate text-sm text-zinc-200">{player}</p>{onlineNames.has(player.toLowerCase()) && <p className="mt-0.5 flex items-center gap-1.5 text-[11px] text-emerald-400"><span className="status-dot bg-emerald-400" />Online</p>}</div>{children(player)}</div>)}</div>}
     </section>
+  )
+}
+
+function SettingsView({ server, setError }: { server: Server; setError: (error: string) => void }) {
+  const [settings, setSettings] = useState<ServerSetting[]>([])
+  const [values, setValues] = useState<Record<string, string>>({})
+  const [originals, setOriginals] = useState<Record<string, string>>({})
+  const [query, setQuery] = useState('')
+  const [newKey, setNewKey] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [notice, setNotice] = useState('')
+
+  const applyDocument = useCallback((items: ServerSetting[]) => {
+    setSettings(items)
+    setValues(Object.fromEntries(items.map((setting) => [setting.key, setting.value])))
+    setOriginals(Object.fromEntries(items.map((setting) => [setting.key, setting.value])))
+  }, [])
+
+  const load = useCallback(async () => {
+    if (!server.installed) return
+    setLoading(true)
+    try {
+      const document = await api.settings(server.id)
+      applyDocument(document.settings)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Could not load server settings')
+    } finally {
+      setLoading(false)
+    }
+  }, [applyDocument, server.id, server.installed, setError])
+
+  useEffect(() => { void load() }, [load])
+
+  const dirtySettings = settings.filter((setting) => {
+    const existed = Object.prototype.hasOwnProperty.call(originals, setting.key)
+    return setting.secret ? values[setting.key] !== '' : !existed || values[setting.key] !== originals[setting.key]
+  })
+
+  async function save() {
+    const updates = Object.fromEntries(dirtySettings.map((setting) => [setting.key, values[setting.key] ?? '']))
+    if (Object.keys(updates).length === 0) return
+    setSaving(true)
+    setNotice('')
+    try {
+      const document = await api.updateSettings(server.id, updates)
+      applyDocument(document.settings)
+      setNotice('Settings saved. They will take effect the next time the server starts.')
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Could not save server settings')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  function addProperty(event: FormEvent) {
+    event.preventDefault()
+    const key = newKey.trim()
+    if (!/^[A-Za-z0-9._-]{1,128}$/.test(key)) {
+      setError('Property names may only contain letters, numbers, periods, underscores, and hyphens.')
+      return
+    }
+    if (settings.some((setting) => setting.key === key)) {
+      setError(`${key} is already present.`)
+      return
+    }
+    const customSetting: ServerSetting = {
+      key,
+      value: '',
+      configured: true,
+      type: 'string',
+      category: 'Other',
+      secret: false,
+      description: 'Custom or version-specific Minecraft server property.',
+    }
+    setSettings((current) => [...current, customSetting].sort((left, right) => left.key.localeCompare(right.key)))
+    setValues((current) => ({ ...current, [key]: '' }))
+    setNewKey('')
+  }
+
+  const normalizedQuery = query.trim().toLowerCase()
+  const filtered = settings.filter((setting) => !normalizedQuery
+    || setting.key.toLowerCase().includes(normalizedQuery)
+    || setting.category.toLowerCase().includes(normalizedQuery)
+    || setting.description?.toLowerCase().includes(normalizedQuery))
+  const categories = Array.from(new Set(filtered.map((setting) => setting.category))).sort()
+  const stopped = server.status !== 'running'
+
+  if (!server.installed) {
+    return (
+      <div className="space-y-6">
+        <div><h2 className="page-title">Settings</h2><p className="page-subtitle">Edit every value in server.properties.</p></div>
+        <section className="panel p-8 text-center"><Settings className="mx-auto text-zinc-600" size={22} /><h3 className="mt-4 text-sm font-medium text-zinc-200">Install the server first</h3><p className="mt-2 text-sm text-zinc-500">Minecraft creates its editable server properties during installation and first startup.</p></section>
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+        <div><h2 className="page-title">Settings</h2><p className="page-subtitle">Every property in server.properties, including version-specific values.</p></div>
+        <div className="flex gap-2">
+          <button className="btn-secondary" type="button" disabled={loading || saving} onClick={() => void load()}><RefreshCw size={14} className={loading ? 'animate-spin' : ''} /> Reload</button>
+          <button className="btn-primary" type="button" disabled={!stopped || saving || dirtySettings.length === 0} onClick={() => void save()}><Save size={14} /> {saving ? 'Saving…' : `Save${dirtySettings.length ? ` (${dirtySettings.length})` : ''}`}</button>
+        </div>
+      </div>
+
+      {!stopped && <div className="rounded-xl border border-amber-500/20 bg-amber-500/[0.045] px-4 py-3 text-sm text-amber-200/80">Stop the server before editing settings. This prevents partial changes and ensures every value is applied together on the next start.</div>}
+      {notice && <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/[0.045] px-4 py-3 text-sm text-emerald-300/80">{notice}</div>}
+
+      <section className="panel">
+        <div className="panel-header flex-wrap">
+          <div><h3 className="panel-title">Server properties</h3><p className="panel-description">{settings.length} properties · changes require a server restart</p></div>
+          <div className="relative w-full sm:w-72"><Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-zinc-600" size={14} /><input className="input pl-9" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search properties…" aria-label="Search server properties" /></div>
+        </div>
+        {loading && settings.length === 0 ? <div className="grid min-h-48 place-items-center text-sm text-zinc-600"><RefreshCw className="mb-3 animate-spin" size={18} />Loading settings…</div> : filtered.length === 0 ? <p className="px-5 py-12 text-center text-sm text-zinc-600">No properties match your search.</p> : (
+          <div className="divide-y divide-zinc-800/80">
+            {categories.map((category) => (
+              <div key={category} className="p-5">
+                <p className="section-label mb-4">{category}</p>
+                <div className="grid gap-x-8 gap-y-5 xl:grid-cols-2">
+                  {filtered.filter((setting) => setting.category === category).map((setting) => (
+                    <SettingField key={setting.key} setting={setting} value={values[setting.key] ?? ''} disabled={!stopped || saving} changed={dirtySettings.includes(setting)} onChange={(value) => {
+                      setValues((current) => ({ ...current, [setting.key]: value }))
+                      setNotice('')
+                    }} />
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+        <div className="border-t border-zinc-800/80 bg-zinc-950/20 p-5">
+          <form className="flex flex-col gap-3 sm:flex-row" onSubmit={addProperty}>
+            <div className="min-w-0 flex-1"><p className="text-sm font-medium text-zinc-300">Add a version-specific property</p><p className="mt-1 text-xs text-zinc-600">Unknown properties remain fully editable and are preserved during updates.</p></div>
+            <input className="input sm:max-w-xs" disabled={!stopped || saving} value={newKey} onChange={(event) => setNewKey(event.target.value)} placeholder="property-name" aria-label="New property name" />
+            <button className="btn-secondary justify-center" disabled={!stopped || !newKey.trim() || saving} type="submit"><Plus size={14} /> Add property</button>
+          </form>
+        </div>
+      </section>
+    </div>
+  )
+}
+
+function SettingField({ setting, value, disabled, changed, onChange }: { setting: ServerSetting; value: string; disabled: boolean; changed: boolean; onChange: (value: string) => void }) {
+  const id = `setting-${setting.key}`
+  const common = { id, disabled, value, onChange: (event: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => onChange(event.target.value) }
+  let control: React.ReactNode
+  if (setting.type === 'boolean') {
+    control = <select className="input" {...common}><option value="true">Enabled</option><option value="false">Disabled</option></select>
+  } else if (setting.type === 'select' && setting.options) {
+    control = <select className="input" {...common}>{setting.options.map((option) => <option key={option} value={option}>{option}</option>)}</select>
+  } else {
+    control = <input className="input" {...common} type={setting.type === 'secret' ? 'password' : setting.type === 'integer' ? 'number' : 'text'} min={setting.min ?? undefined} max={setting.max ?? undefined} placeholder={setting.secret && setting.configured ? 'Configured — enter a new value to replace' : undefined} />
+  }
+  return (
+    <label htmlFor={id} className="block min-w-0">
+      <span className="mb-2 flex items-center gap-2"><code className="break-all text-xs text-zinc-300">{setting.key}</code>{changed && <span className="rounded border border-blue-500/20 bg-blue-500/10 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-blue-300">Changed</span>}</span>
+      {control}
+      {setting.description && <span className="mt-2 block text-xs leading-5 text-zinc-600">{setting.description}</span>}
+    </label>
   )
 }
 

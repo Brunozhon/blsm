@@ -9,6 +9,7 @@ BLSM (pronounced “Blossom”) is a lightweight, LAN-first game-server control 
 - Detached Minecraft process groups: the game keeps running if the BLSM web process restarts
 - Crash detection, PID/memory/CPU/uptime telemetry, disk-backed live console, and RCON command input
 - Live player presence, whitelist enforcement and membership, and operator management
+- Searchable Settings tab for every `server.properties` value, with typed controls, concise guidance, masked secrets, and support for future properties
 - Modrinth search filtered to the server's Minecraft and Fabric versions
 - Verified mod install, update, and removal (downloads are checked against Modrinth SHA-512 hashes)
 - Capability-driven React UI and a modular `ServerAdapter` backend boundary

@@ -25,6 +25,7 @@ from .schemas import (
     PasswordPayload,
     PlayerAccess,
     ServerCreate,
+    ServerSettingsUpdate,
     WhitelistSetting,
 )
 
@@ -179,6 +180,48 @@ async def restart_server(request: Request, server_id: str) -> dict[str, Any]:
 @router.get("/servers/{server_id}/stats", dependencies=[Depends(require_admin)])
 async def server_stats(request: Request, server_id: str) -> dict[str, Any]:
     return request.app.state.processes.stats(_server_or_404(request, server_id))
+
+
+def _settings_adapter(request: Request, server: dict[str, Any]) -> Any:
+    adapter = request.app.state.adapters[server["adapter"]]
+    if AdapterCapability.SETTINGS not in adapter.capabilities:
+        raise HTTPException(
+            status_code=404, detail="This server does not expose editable settings"
+        )
+    return adapter
+
+
+def _settings_view(adapter: Any, server: dict[str, Any]) -> dict[str, Any]:
+    try:
+        settings = adapter.server_settings(Path(server["path"]), server["config"])
+    except (OSError, RuntimeError) as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {"settings": settings, "restart_required": True}
+
+
+@router.get("/servers/{server_id}/settings", dependencies=[Depends(require_admin)])
+async def server_settings(request: Request, server_id: str) -> dict[str, Any]:
+    server = _server_or_404(request, server_id)
+    return _settings_view(_settings_adapter(request, server), server)
+
+
+@router.put("/servers/{server_id}/settings", dependencies=[Depends(require_admin)])
+async def update_server_settings(
+    request: Request, server_id: str, payload: ServerSettingsUpdate
+) -> dict[str, Any]:
+    server = _server_or_404(request, server_id)
+    adapter = _settings_adapter(request, server)
+    if request.app.state.processes.status(server) == "running":
+        raise HTTPException(status_code=409, detail="Stop the server before changing settings")
+    try:
+        config = adapter.update_server_settings(
+            Path(server["path"]), server["config"], payload.values
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    request.app.state.db.update_server_config(server_id, config)
+    updated = _server_or_404(request, server_id)
+    return _settings_view(adapter, updated)
 
 
 def _player_adapter(

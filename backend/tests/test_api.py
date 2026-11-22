@@ -120,7 +120,40 @@ async def test_first_run_auth_and_server_creation(tmp_path: Path) -> None:
         assert status == 201
         assert body["status"] == "not_installed"
         assert "mods" in body["capabilities"]
+        assert "settings" in body["capabilities"]
         assert "rcon_password" not in body["config"]
+
+        server_path = next((tmp_path / "servers").iterdir())
+        (server_path / "server.properties").write_text(
+            "motd=Test server\nrcon.password=hidden\nserver-port=25565\n",
+            encoding="utf-8",
+        )
+        settings_status, settings_body = await request_json(
+            app,
+            "GET",
+            f"/api/servers/{body['id']}/settings",
+            headers={"Authorization": f"Bearer {setup['token']}"},
+        )
+        assert settings_status == 200
+        setting_values = {item["key"]: item for item in settings_body["settings"]}
+        assert setting_values["motd"]["value"] == "Test server"
+        assert setting_values["rcon.password"]["value"] == ""
+
+        update_status, updated_settings = await request_json(
+            app,
+            "PUT",
+            f"/api/servers/{body['id']}/settings",
+            {"values": {"motd": "Updated", "server-port": "25570"}},
+            {"Authorization": f"Bearer {setup['token']}"},
+        )
+        assert update_status == 200
+        assert updated_settings["restart_required"] is True
+        saved = (server_path / "server.properties").read_text(encoding="utf-8")
+        assert "motd=Updated" in saved
+        assert "server-port=25570" in saved
+        refreshed = app.state.db.get_server(body["id"])
+        assert refreshed is not None
+        assert refreshed["config"]["server_port"] == 25570
         player_status, players = await request_json(
             app,
             "GET",

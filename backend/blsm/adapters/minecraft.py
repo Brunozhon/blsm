@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import secrets
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +14,7 @@ import httpx
 
 from . import rcon
 from .base import AdapterCapability, ServerAdapter
+from .minecraft_properties import PROPERTY_METADATA, SECRET_PROPERTIES
 
 FABRIC_META = "https://meta.fabricmc.net/v2"
 
@@ -26,6 +29,7 @@ class MinecraftFabricAdapter(ServerAdapter):
             AdapterCapability.PLAYERS,
             AdapterCapability.WHITELIST,
             AdapterCapability.OPERATORS,
+            AdapterCapability.SETTINGS,
             AdapterCapability.GAME_RULES,
             AdapterCapability.FILES,
             AdapterCapability.BACKUPS,
@@ -212,8 +216,87 @@ class MinecraftFabricAdapter(ServerAdapter):
     async def graceful_stop(self, path: Path, config: dict[str, Any]) -> None:
         await self.send_command(path, config, "stop")
 
+    def server_settings(
+        self, path: Path, config: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        del config
+        properties_path = self._properties_path(path)
+        properties = self._read_properties(properties_path)
+        result: list[dict[str, Any]] = []
+        for key, value in sorted(properties.items()):
+            metadata = PROPERTY_METADATA.get(key, {})
+            secret = key in SECRET_PROPERTIES or metadata.get("type") == "secret"
+            result.append(
+                {
+                    "key": key,
+                    "value": "" if secret else value,
+                    "configured": bool(value) if secret else True,
+                    "type": metadata.get("type", "string"),
+                    "description": metadata.get("description"),
+                    "category": metadata.get("category", "Other"),
+                    "options": metadata.get("options"),
+                    "min": metadata.get("min"),
+                    "max": metadata.get("max"),
+                    "secret": secret,
+                }
+            )
+        return result
+
+    def update_server_settings(
+        self, path: Path, config: dict[str, Any], values: dict[str, str]
+    ) -> dict[str, Any]:
+        properties_path = self._properties_path(path)
+        properties = self._read_properties(properties_path)
+        for key, value in values.items():
+            self._validate_property(key, value)
+            properties[key] = value
+        self._write_properties(properties_path, properties)
+
+        normalized = dict(config)
+        integer_config = {"server-port": "server_port", "rcon.port": "rcon_port"}
+        for property_name, config_name in integer_config.items():
+            if property_name in values:
+                normalized[config_name] = int(values[property_name])
+        if "rcon.password" in values:
+            normalized["rcon_password"] = values["rcon.password"]
+        return normalized
+
     def is_installed(self, path: Path) -> bool:
         return (path / "fabric-server-launch.jar").is_file()
+
+    @staticmethod
+    def _properties_path(path: Path) -> Path:
+        properties_path = path / "server.properties"
+        if properties_path.is_symlink():
+            raise RuntimeError("Refusing to manage a symlinked server.properties file")
+        if not properties_path.is_file():
+            raise RuntimeError("Install the server before editing server.properties")
+        return properties_path
+
+    @staticmethod
+    def _validate_property(key: str, value: str) -> None:
+        if not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", key):
+            raise ValueError(f"Invalid setting name: {key}")
+        if len(value) > 8192 or any(character in value for character in "\r\n\x00"):
+            raise ValueError(f"Invalid value for setting: {key}")
+        metadata = PROPERTY_METADATA.get(key)
+        if metadata is None:
+            return
+        kind = metadata.get("type")
+        if kind == "boolean" and value not in {"true", "false"}:
+            raise ValueError(f"{key} must be true or false")
+        options = metadata.get("options")
+        if options is not None and value not in options:
+            raise ValueError(f"{key} must be one of: {', '.join(options)}")
+        if kind == "integer":
+            try:
+                number = int(value)
+            except ValueError as exc:
+                raise ValueError(f"{key} must be a whole number") from exc
+            if metadata.get("min") is not None and number < metadata["min"]:
+                raise ValueError(f"{key} must be at least {metadata['min']}")
+            if metadata.get("max") is not None and number > metadata["max"]:
+                raise ValueError(f"{key} must be at most {metadata['max']}")
 
     @staticmethod
     def _validate_player_name(name: str) -> str:
@@ -273,4 +356,17 @@ class MinecraftFabricAdapter(ServerAdapter):
         contents = "# Managed by BLSM\n" + "".join(
             f"{key}={value}\n" for key, value in sorted(properties.items())
         )
-        path.write_text(contents, encoding="utf-8")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=".server.properties.", dir=path.parent, text=True
+        )
+        temporary_path = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(contents)
+                handle.flush()
+                os.fsync(handle.fileno())
+            temporary_path.chmod(0o600)
+            temporary_path.replace(path)
+        finally:
+            temporary_path.unlink(missing_ok=True)

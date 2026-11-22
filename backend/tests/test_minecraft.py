@@ -33,6 +33,68 @@ def test_rejects_java_runtime_that_is_too_old(monkeypatch: Any) -> None:
         )
 
 
+def test_reads_and_updates_all_server_properties_without_exposing_secrets(
+    tmp_path: Path,
+) -> None:
+    properties_path = tmp_path / "server.properties"
+    properties_path.write_text(
+        "# Minecraft server properties\n"
+        "allow-flight=false\n"
+        "difficulty=normal\n"
+        "rcon.password=do-not-expose\n"
+        "server-port=25565\n"
+        "future-setting=preserved\n",
+        encoding="utf-8",
+    )
+    adapter = MinecraftFabricAdapter()
+
+    settings = {item["key"]: item for item in adapter.server_settings(tmp_path, {})}
+    assert settings["allow-flight"]["type"] == "boolean"
+    assert settings["allow-flight"]["description"]
+    assert settings["future-setting"]["type"] == "string"
+    assert settings["future-setting"]["value"] == "preserved"
+    assert settings["rcon.password"]["value"] == ""
+    assert settings["rcon.password"]["configured"] is True
+
+    config = adapter.update_server_settings(
+        tmp_path,
+        {"server_port": 25565, "rcon_password": "do-not-expose"},
+        {
+            "allow-flight": "true",
+            "future-setting": "updated",
+            "rcon.password": "new-secret",
+            "server-port": "25570",
+        },
+    )
+    contents = properties_path.read_text(encoding="utf-8")
+    assert "allow-flight=true" in contents
+    assert "future-setting=updated" in contents
+    assert "difficulty=normal" in contents
+    assert config["server_port"] == 25570
+    assert config["rcon_password"] == "new-secret"
+    assert properties_path.stat().st_mode & 0o777 == 0o600
+
+
+def test_rejects_invalid_property_values_and_symlinks(tmp_path: Path) -> None:
+    adapter = MinecraftFabricAdapter()
+    properties_path = tmp_path / "server.properties"
+    properties_path.write_text("allow-flight=false\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="true or false"):
+        adapter.update_server_settings(tmp_path, {}, {"allow-flight": "sometimes"})
+    with pytest.raises(ValueError, match="whole number"):
+        adapter.update_server_settings(tmp_path, {}, {"server-port": "minecraft"})
+    with pytest.raises(ValueError, match="Invalid setting name"):
+        adapter.update_server_settings(tmp_path, {}, {"unsafe setting": "value"})
+
+    properties_path.unlink()
+    external = tmp_path / "external.properties"
+    external.write_text("motd=external\n", encoding="utf-8")
+    properties_path.symlink_to(external)
+    with pytest.raises(RuntimeError, match="symlinked"):
+        adapter.server_settings(tmp_path, {})
+
+
 async def test_reads_player_state_and_uses_safe_console_commands(
     tmp_path: Path, monkeypatch: Any
 ) -> None:

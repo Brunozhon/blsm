@@ -13,6 +13,7 @@ class AdapterCapability(str, Enum):
     PLAYERS = "players"
     WHITELIST = "whitelist"
     OPERATORS = "operators"
+    SETTINGS = "settings"
     GAME_RULES = "game_rules"
     FILES = "files"
     BACKUPS = "backups"
@@ -77,6 +78,18 @@ class ServerAdapter(ABC):
     ) -> str:
         """Enable or disable whitelist enforcement."""
         raise NotImplementedError("This server adapter does not manage a whitelist")
+
+    def server_settings(
+        self, path: Path, config: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """Return editable, adapter-described server settings."""
+        raise NotImplementedError("This server adapter does not expose settings")
+
+    def update_server_settings(
+        self, path: Path, config: dict[str, Any], values: dict[str, str]
+    ) -> dict[str, Any]:
+        """Persist settings and return the normalized adapter configuration."""
+        raise NotImplementedError("This server adapter does not expose settings")
 
     def public_metadata(self) -> dict[str, Any]:
         return {
