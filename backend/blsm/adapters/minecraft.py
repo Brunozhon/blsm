@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import re
 import secrets
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -97,6 +100,57 @@ class MinecraftFabricAdapter(ServerAdapter):
             "fabric-server-launch.jar",
             "nogui",
         ]
+
+    @staticmethod
+    def required_java_major(game_version: str) -> int:
+        """Return the minimum Java runtime for supported Minecraft releases."""
+        match = re.match(r"^(\d+)(?:\.(\d+))?(?:\.(\d+))?", game_version)
+        if match is None:
+            return 25
+        major = int(match.group(1))
+        minor = int(match.group(2) or 0)
+        patch = int(match.group(3) or 0)
+        if major >= 26:
+            return 25
+        if major == 1 and (minor > 20 or (minor == 20 and patch >= 5)):
+            return 21
+        if major == 1 and minor >= 18:
+            return 17
+        if major == 1 and minor == 17:
+            return 16
+        return 8
+
+    def validate_environment(self, path: Path, config: dict[str, Any]) -> None:
+        del path
+        game_version = str(config.get("game_version", "1.21.4"))
+        required = self.required_java_major(game_version)
+        java = shutil.which("java")
+        if java is None:
+            raise RuntimeError(
+                f"Minecraft {game_version} requires Java {required} or newer, "
+                "but Java is not installed"
+            )
+        try:
+            result = subprocess.run(
+                [java, "-XshowSettings:properties", "-version"],
+                capture_output=True,
+                check=False,
+                text=True,
+                timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise RuntimeError(f"Could not inspect the Java runtime at {java}") from exc
+        output = f"{result.stdout}\n{result.stderr}"
+        version_match = re.search(r"java\.specification\.version\s*=\s*(?:1\.)?(\d+)", output)
+        if result.returncode != 0 or version_match is None:
+            raise RuntimeError(f"Could not determine the Java version at {java}")
+        installed = int(version_match.group(1))
+        if installed < required:
+            raise RuntimeError(
+                f"Minecraft {game_version} requires Java {required} or newer; "
+                f"BLSM found Java {installed}. Rerun the current BLSM installer "
+                "to upgrade the managed Java runtime."
+            )
 
     async def send_command(self, path: Path, config: dict[str, Any], command: str) -> str:
         return await rcon.command(

@@ -51,6 +51,107 @@ activate_release() {
   mv -Tf "$temporary_link" "$APP_ROOT/current"
 }
 
+install_apt_signing_key() {
+  local url="$1"
+  local destination="$2"
+  local label="$3"
+  local temporary_dir staged_key
+
+  [[ ! -L "$destination" ]] || die "Refusing symbolic-link APT keyring: $destination"
+  install -d -m 0755 -o root -g root "$(dirname -- "$destination")"
+  temporary_dir="$(mktemp -d /tmp/blsm-apt-key.XXXXXX)" \
+    || die "Could not create temporary storage for the $label APT key"
+  if ! staged_key="$(mktemp "${destination}.new.XXXXXX")"; then
+    rm -rf -- "$temporary_dir"
+    die "Could not stage the $label APT keyring"
+  fi
+
+  if curl --fail --silent --show-error --location \
+      "$url" --output "$temporary_dir/key.asc" \
+    && gpg --batch --yes --dearmor \
+      --output "$temporary_dir/keyring.gpg" "$temporary_dir/key.asc" \
+    && gpg --batch --quiet --show-keys "$temporary_dir/keyring.gpg" >/dev/null \
+    && install -m 0644 -o root -g root "$temporary_dir/keyring.gpg" "$staged_key" \
+    && mv -fT -- "$staged_key" "$destination"; then
+    rm -rf -- "$temporary_dir"
+    return 0
+  fi
+
+  rm -rf -- "$temporary_dir"
+  rm -f -- "$staged_key"
+  die "Could not install the $label APT signing key"
+}
+
+install_apt_source_list() {
+  local destination="$1"
+  local source_line="$2"
+  local staged_source
+
+  [[ ! -L "$destination" ]] || die "Refusing symbolic-link APT source: $destination"
+  staged_source="$(mktemp "${destination}.new.XXXXXX")" \
+    || die "Could not stage APT source configuration at $destination"
+  if printf '%s\n' "$source_line" > "$staged_source" \
+    && chown root:root "$staged_source" \
+    && chmod 0644 "$staged_source" \
+    && mv -fT -- "$staged_source" "$destination"; then
+    return 0
+  fi
+  rm -f -- "$staged_source"
+  die "Could not install APT source configuration at $destination"
+}
+
+java_major() {
+  java -XshowSettings:properties -version 2>&1 \
+    | awk -F= '/java[.]specification[.]version/ {gsub(/[[:space:]]/, "", $2); print $2; exit}'
+}
+
+ensure_java() {
+  local major=0 java_25="" os_codename="" source_line=""
+  if command -v java >/dev/null 2>&1; then
+    major="$(java_major)"
+  fi
+  if [[ "$major" =~ ^[0-9]+$ ]] && (( major >= 25 )); then
+    log "Using Java $major"
+    return
+  fi
+
+  log 'Upgrading the game-server runtime to Java 25'
+  apt-get update
+  if apt-cache show openjdk-25-jre-headless >/dev/null 2>&1; then
+    apt-get install -y --no-install-recommends openjdk-25-jre-headless
+  else
+    [[ -r /etc/os-release ]] || die 'Unable to identify this operating system'
+    # shellcheck disable=SC1091
+    . /etc/os-release
+    os_codename="${VERSION_CODENAME:-}"
+    [[ -n "$os_codename" ]] || die 'Unable to determine the Ubuntu release codename'
+    install_apt_signing_key \
+      https://packages.adoptium.net/artifactory/api/gpg/key/public \
+      /usr/share/keyrings/adoptium.gpg Adoptium
+    printf -v source_line \
+      'deb [signed-by=/usr/share/keyrings/adoptium.gpg] https://packages.adoptium.net/artifactory/deb %s main' \
+      "$os_codename"
+    install_apt_source_list /etc/apt/sources.list.d/adoptium.list "$source_line"
+    apt-get update
+    apt-get install -y --no-install-recommends temurin-25-jre
+  fi
+
+  major="$(java_major)"
+  if [[ ! "$major" =~ ^[0-9]+$ ]] || (( major < 25 )); then
+    java_25="$(
+      update-alternatives --list java \
+        | grep -E '/(java|temurin)-25[^/]*/bin/java$' \
+        | head -n 1 \
+        || true
+    )"
+    [[ -n "$java_25" ]] || die 'Java 25 was installed but could not be selected'
+    update-alternatives --set java "$java_25"
+  fi
+  major="$(java_major)"
+  [[ "$major" =~ ^[0-9]+$ ]] && (( major >= 25 )) \
+    || die 'Java 25 or newer is required for current Minecraft releases'
+}
+
 secure_release_permissions() {
   local release_dir="$1"
   local resolved_release releases_root
@@ -213,6 +314,8 @@ if [[ "$release_ref" == "$current_ref" && $FORCE -ne 1 ]]; then
   SUCCESS=1
   exit 0
 fi
+
+ensure_java
 
 command -v npm >/dev/null 2>&1 \
   || die 'npm is required to update BLSM; rerun the current install.sh to repair Node.js'

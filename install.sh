@@ -226,20 +226,20 @@ java_major() {
 }
 
 ensure_java() {
-  local major=0
+  local major=0 java_25=""
   if command -v java >/dev/null 2>&1; then
     major="$(java_major)"
   fi
-  if [[ "$major" =~ ^[0-9]+$ ]] && (( major >= 21 )); then
+  if [[ "$major" =~ ^[0-9]+$ ]] && (( major >= 25 )); then
     log "Using Java $major"
     return
   fi
 
-  if apt-cache show openjdk-21-jre-headless >/dev/null 2>&1; then
-    log 'Installing OpenJDK 21'
-    apt-get install -y --no-install-recommends openjdk-21-jre-headless
+  if apt-cache show openjdk-25-jre-headless >/dev/null 2>&1; then
+    log 'Installing OpenJDK 25'
+    apt-get install -y --no-install-recommends openjdk-25-jre-headless
   else
-    log 'Installing Eclipse Temurin Java 21'
+    log 'Installing Eclipse Temurin Java 25'
     local source_line
     install_apt_signing_key \
       https://packages.adoptium.net/artifactory/api/gpg/key/public \
@@ -249,15 +249,21 @@ ensure_java() {
       "$VERSION_CODENAME"
     install_apt_source_list /etc/apt/sources.list.d/adoptium.list "$source_line"
     apt-get update
-    apt-get install -y --no-install-recommends temurin-21-jre
-    if [[ "$(java_major)" -lt 21 ]]; then
-      temurin_java="$(update-alternatives --list java | grep 'temurin-21' | head -n 1 || true)"
-      [[ -n "$temurin_java" ]] || die 'Java 21 was installed but could not be selected'
-      update-alternatives --set java "$temurin_java"
-    fi
+    apt-get install -y --no-install-recommends temurin-25-jre
   fi
   major="$(java_major)"
-  [[ "$major" =~ ^[0-9]+$ ]] && (( major >= 21 )) || die 'Java 21 or newer is required'
+  if [[ ! "$major" =~ ^[0-9]+$ ]] || (( major < 25 )); then
+    java_25="$(
+      update-alternatives --list java \
+        | grep -E '/(java|temurin)-25[^/]*/bin/java$' \
+        | head -n 1 \
+        || true
+    )"
+    [[ -n "$java_25" ]] || die 'Java 25 was installed but could not be selected'
+    update-alternatives --set java "$java_25"
+  fi
+  major="$(java_major)"
+  [[ "$major" =~ ^[0-9]+$ ]] && (( major >= 25 )) || die 'Java 25 or newer is required'
 }
 
 ensure_node() {

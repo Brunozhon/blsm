@@ -48,6 +48,10 @@ class ServerAdapter(ABC):
     def is_installed(self, path: Path) -> bool:
         """Whether enough server files exist to launch."""
 
+    def validate_environment(self, path: Path, config: dict[str, Any]) -> None:
+        """Raise a useful error when host runtime requirements are not met."""
+        return None
+
     def public_metadata(self) -> dict[str, Any]:
         return {
             "key": self.key,

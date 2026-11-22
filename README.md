@@ -21,7 +21,7 @@ Backups, file browsing, game-rule editing, player management, and map integratio
 - Outbound HTTPS access while installing and updating
 - About 250 MB for BLSM itself, plus memory and disk for each game server
 
-The installer supplies Python, Node.js 20, Java 21, and the other required system packages.
+The installer supplies Python, Node.js 20, Java 25, and the other required system packages.
 
 ## Production installation
 
@@ -41,7 +41,7 @@ sudo ./install.sh
 
 The script is safe to rerun. It repairs permissions on BLSM-configured APT keyrings, preserves existing configuration and data, creates a new application release, and rolls back the application symlink if the health check fails. It automatically:
 
-- Installs Python, Node.js 20, Java 21, Git, rsync, and supporting packages
+- Installs Python, Node.js 20, Java 25, Git, rsync, and supporting packages
 - Builds the React dashboard and creates an isolated Python environment
 - Creates the locked-down `blsm` service account
 - Stores application releases under `/opt/blsm/releases`

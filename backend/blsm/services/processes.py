@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import shutil
 import signal
 import subprocess
 import time
@@ -57,8 +56,7 @@ class ProcessManager:
             path = Path(server["path"])
             if not adapter.is_installed(path):
                 raise ProcessError("Install the server before starting it")
-            if shutil.which("java") is None:
-                raise ProcessError("Java is not installed or is not available on PATH")
+            adapter.validate_environment(path, server["config"])
             log_path = path / "blsm-console.log"
             log_handle = log_path.open("ab", buffering=0)
             try:
