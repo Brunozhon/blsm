@@ -39,7 +39,7 @@ cd blsm
 sudo ./install.sh
 ```
 
-The script is safe to rerun. It preserves existing configuration and data, creates a new application release, and rolls back the application symlink if the health check fails. It automatically:
+The script is safe to rerun. It repairs permissions on BLSM-configured APT keyrings, preserves existing configuration and data, creates a new application release, and rolls back the application symlink if the health check fails. It automatically:
 
 - Installs Python, Node.js 20, Java 21, Git, rsync, and supporting packages
 - Builds the React dashboard and creates an isolated Python environment
@@ -103,6 +103,18 @@ sudo systemctl restart blsm
 ```
 
 Minecraft runs in a separate OS session. Restarting the BLSM web service does not stop a running game server. Stop game servers from the dashboard before shutting down the machine.
+
+### Uninstalling
+
+Uninstalling is destructive: it permanently removes BLSM and every server it manages, including all worlds, mods, backups, configuration, users, logs, and SQLite data. Download and run the uninstaller from an interactive terminal:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Brunozhon/blsm/main/uninstall.sh | sudo bash
+```
+
+You must type `UNINSTALL BLSM` exactly before any changes are made. A checkout can run `sudo ./uninstall.sh`; an installed release can run `sudo /opt/blsm/current/uninstall.sh`. The default behavior is always a complete uninstall; there is no separate `--purge` option.
+
+For an installation that used custom locations, pass the same `BLSM_INSTALL_DIR`, `BLSM_DATA_DIR`, `BLSM_CONFIG_DIR`, or `BLSM_BACKUP_DIR` environment overrides through `sudo`. The script displays every target before confirmation, stops managed servers gracefully, and refuses to delete unsafe, overlapping, symbolic-link, or unverified paths. Shared packages such as Java, Node.js, Python, Git, and system journal files are retained because other software may use them.
 
 ## Development
 

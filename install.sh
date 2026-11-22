@@ -92,9 +92,98 @@ else
   die 'Unable to identify this operating system'
 fi
 
+install_apt_signing_key() {
+  local url="$1"
+  local destination="$2"
+  local label="$3"
+  local temporary_dir staged_key
+
+  [[ ! -L "$destination" ]] || die "Refusing symbolic-link APT keyring: $destination"
+  install -d -m 0755 -o root -g root "$(dirname -- "$destination")"
+  temporary_dir="$(mktemp -d /tmp/blsm-apt-key.XXXXXX)" \
+    || die "Could not create temporary storage for the $label APT key"
+  if ! staged_key="$(mktemp "${destination}.new.XXXXXX")"; then
+    rm -rf -- "$temporary_dir"
+    die "Could not stage the $label APT keyring"
+  fi
+
+  if curl --fail --silent --show-error --location \
+      "$url" --output "$temporary_dir/key.asc" \
+    && gpg --batch --yes --dearmor \
+      --output "$temporary_dir/keyring.gpg" "$temporary_dir/key.asc" \
+    && gpg --batch --quiet --show-keys \
+      "$temporary_dir/keyring.gpg" >/dev/null \
+    && install -m 0644 -o root -g root \
+      "$temporary_dir/keyring.gpg" "$staged_key" \
+    && mv -fT -- "$staged_key" "$destination"; then
+    rm -rf -- "$temporary_dir"
+    return 0
+  fi
+
+  rm -rf -- "$temporary_dir"
+  rm -f -- "$staged_key"
+  die "Could not install the $label APT signing key"
+}
+
+install_apt_source_list() {
+  local destination="$1"
+  local source_line="$2"
+  local staged_source
+
+  [[ ! -L "$destination" ]] || die "Refusing symbolic-link APT source: $destination"
+  staged_source="$(mktemp "${destination}.new.XXXXXX")" \
+    || die "Could not stage APT source configuration at $destination"
+  if printf '%s\n' "$source_line" > "$staged_source" \
+    && chown root:root "$staged_source" \
+    && chmod 0644 "$staged_source" \
+    && mv -fT -- "$staged_source" "$destination"; then
+    return 0
+  fi
+  rm -f -- "$staged_source"
+  die "Could not install APT source configuration at $destination"
+}
+
+repair_existing_apt_configuration() {
+  local path
+  local managed_files=(
+    /usr/share/keyrings/nodesource.gpg
+    /usr/share/keyrings/adoptium.gpg
+    /etc/apt/sources.list.d/nodesource.list
+    /etc/apt/sources.list.d/adoptium.list
+  )
+  for path in "${managed_files[@]}"; do
+    if [[ -f "$path" && ! -L "$path" ]]; then
+      chown root:root "$path"
+      chmod 0644 "$path"
+    fi
+  done
+
+  # A failed earlier run may have left a repository enabled with an unreadable
+  # or incomplete keyring. Refresh it before the first apt-get update.
+  if command -v curl >/dev/null 2>&1 && command -v gpg >/dev/null 2>&1; then
+    if [[ -f /etc/apt/sources.list.d/nodesource.list ]] \
+      && grep -Fq 'https://deb.nodesource.com/node_20.x' \
+        /etc/apt/sources.list.d/nodesource.list; then
+      log 'Repairing the existing NodeSource APT keyring'
+      install_apt_signing_key \
+        https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+        /usr/share/keyrings/nodesource.gpg NodeSource
+    fi
+    if [[ -f /etc/apt/sources.list.d/adoptium.list ]] \
+      && grep -Fq 'https://packages.adoptium.net/artifactory/deb' \
+        /etc/apt/sources.list.d/adoptium.list; then
+      log 'Repairing the existing Adoptium APT keyring'
+      install_apt_signing_key \
+        https://packages.adoptium.net/artifactory/api/gpg/key/public \
+        /usr/share/keyrings/adoptium.gpg Adoptium
+    fi
+  fi
+}
+
 install_system_dependencies() {
   log 'Installing system dependencies'
   export DEBIAN_FRONTEND=noninteractive
+  repair_existing_apt_configuration
   apt-get update
   apt-get install -y --no-install-recommends \
     ca-certificates curl git gnupg \
@@ -151,16 +240,14 @@ ensure_java() {
     apt-get install -y --no-install-recommends openjdk-21-jre-headless
   else
     log 'Installing Eclipse Temurin Java 21'
-    local key_file
-    key_file="$(mktemp)"
-    curl --fail --silent --show-error --location \
+    local source_line
+    install_apt_signing_key \
       https://packages.adoptium.net/artifactory/api/gpg/key/public \
-      --output "$key_file"
-    gpg --batch --yes --dearmor \
-      --output /usr/share/keyrings/adoptium.gpg "$key_file"
-    rm -f -- "$key_file"
-    printf 'deb [signed-by=/usr/share/keyrings/adoptium.gpg] https://packages.adoptium.net/artifactory/deb %s main\n' \
-      "$VERSION_CODENAME" > /etc/apt/sources.list.d/adoptium.list
+      /usr/share/keyrings/adoptium.gpg Adoptium
+    printf -v source_line \
+      'deb [signed-by=/usr/share/keyrings/adoptium.gpg] https://packages.adoptium.net/artifactory/deb %s main' \
+      "$VERSION_CODENAME"
+    install_apt_source_list /etc/apt/sources.list.d/adoptium.list "$source_line"
     apt-get update
     apt-get install -y --no-install-recommends temurin-21-jre
     if [[ "$(java_major)" -lt 21 ]]; then
@@ -184,16 +271,11 @@ ensure_node() {
   fi
 
   log 'Installing Node.js 20 build toolchain'
-  local key_file
-  key_file="$(mktemp)"
-  curl --fail --silent --show-error --location \
+  install_apt_signing_key \
     https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
-    --output "$key_file"
-  gpg --batch --yes --dearmor \
-    --output /usr/share/keyrings/nodesource.gpg "$key_file"
-  rm -f -- "$key_file"
-  printf 'deb [signed-by=/usr/share/keyrings/nodesource.gpg] https://deb.nodesource.com/node_20.x nodistro main\n' \
-    > /etc/apt/sources.list.d/nodesource.list
+    /usr/share/keyrings/nodesource.gpg NodeSource
+  install_apt_source_list /etc/apt/sources.list.d/nodesource.list \
+    'deb [signed-by=/usr/share/keyrings/nodesource.gpg] https://deb.nodesource.com/node_20.x nodistro main'
   apt-get update
   apt-get install -y --no-install-recommends nodejs
   node_major="$(node --version | sed -E 's/^v([0-9]+).*/\1/')"
