@@ -1,0 +1,544 @@
+import {
+  Activity,
+  Box,
+  Boxes,
+  CirclePlus,
+  Command,
+  Download,
+  Gauge,
+  LogOut,
+  MemoryStick,
+  Menu,
+  MoreHorizontal,
+  PackageCheck,
+  Play,
+  Plus,
+  RefreshCw,
+  Search,
+  ServerIcon,
+  Settings,
+  ShieldCheck,
+  Square,
+  Terminal,
+  Trash2,
+  Users,
+  X,
+} from 'lucide-react'
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { api, session } from './api'
+import type { InstalledMod, ModResult, Server, Stats } from './types'
+
+type View = 'overview' | 'console' | 'mods'
+
+function App() {
+  const [authenticated, setAuthenticated] = useState(Boolean(session.get()))
+
+  useEffect(() => {
+    const unauthorized = () => setAuthenticated(false)
+    window.addEventListener('blsm:unauthorized', unauthorized)
+    return () => window.removeEventListener('blsm:unauthorized', unauthorized)
+  }, [])
+
+  if (!authenticated) {
+    return <AuthScreen onAuthenticated={() => setAuthenticated(true)} />
+  }
+  return <Dashboard onLogout={() => { session.clear(); setAuthenticated(false) }} />
+}
+
+function Brand({ compact = false }: { compact?: boolean }) {
+  return (
+    <div className="flex items-center gap-3">
+      <div className="grid size-8 shrink-0 place-items-center rounded-lg border border-blue-400/25 bg-blue-500/10 text-sm font-semibold text-blue-300 shadow-[inset_0_0_18px_rgba(59,130,246,0.08)]">
+        B
+      </div>
+      {!compact && (
+        <div>
+          <div className="text-sm font-semibold tracking-[-0.01em] text-zinc-100">BLSM</div>
+          <div className="text-xs text-zinc-600">Server manager</div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function AuthScreen({ onAuthenticated }: { onAuthenticated: () => void }) {
+  const [configured, setConfigured] = useState<boolean | null>(null)
+  const [password, setPassword] = useState('')
+  const [confirm, setConfirm] = useState('')
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    api.authStatus().then((result) => setConfigured(result.configured)).catch(() => {
+      setError('BLSM could not reach the server service.')
+      setConfigured(false)
+    })
+  }, [])
+
+  async function submit(event: FormEvent) {
+    event.preventDefault()
+    if (configured === false && password !== confirm) {
+      setError('The passwords do not match.')
+      return
+    }
+    setBusy(true)
+    setError('')
+    try {
+      const result = await api.authenticate(password, configured === false)
+      session.set(result.token)
+      onAuthenticated()
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Authentication failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <main className="grid min-h-screen place-items-center bg-[#090a0c] px-5 text-zinc-100">
+      <div className="absolute inset-0 auth-grid opacity-30" />
+      <section className="relative w-full max-w-[410px]">
+        <div className="mb-10 flex justify-center"><Brand /></div>
+        <div className="panel p-7 sm:p-8">
+          <div className="mb-7">
+            <div className="mb-4 grid size-10 place-items-center rounded-xl border border-zinc-800 bg-zinc-900 text-zinc-400">
+              <ShieldCheck size={19} />
+            </div>
+            <h1 className="text-xl font-semibold tracking-[-0.025em]">
+              {configured === false ? 'Create administrator' : 'Welcome back'}
+            </h1>
+            <p className="mt-2 text-sm leading-6 text-zinc-500">
+              {configured === false
+                ? 'Choose a strong password for this BLSM installation.'
+                : 'Sign in to manage your game servers.'}
+            </p>
+          </div>
+          <form onSubmit={submit} className="space-y-4">
+            <label className="field-label">
+              Password
+              <input
+                autoFocus
+                minLength={12}
+                required
+                type="password"
+                autoComplete={configured === false ? 'new-password' : 'current-password'}
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                className="input mt-2"
+                placeholder="At least 12 characters"
+              />
+            </label>
+            {configured === false && (
+              <label className="field-label">
+                Confirm password
+                <input
+                  minLength={12}
+                  required
+                  type="password"
+                  autoComplete="new-password"
+                  value={confirm}
+                  onChange={(event) => setConfirm(event.target.value)}
+                  className="input mt-2"
+                  placeholder="Repeat your password"
+                />
+              </label>
+            )}
+            {error && <p role="alert" className="rounded-lg border border-red-500/20 bg-red-500/5 px-3 py-2.5 text-sm text-red-300">{error}</p>}
+            <button disabled={busy || configured === null} className="btn-primary mt-2 w-full justify-center" type="submit">
+              {busy && <RefreshCw size={15} className="animate-spin" />}
+              {configured === false ? 'Create and continue' : 'Sign in'}
+            </button>
+          </form>
+        </div>
+        <p className="mt-5 text-center text-xs text-zinc-700">LAN-first · Session stays in this browser tab</p>
+      </section>
+    </main>
+  )
+}
+
+function Dashboard({ onLogout }: { onLogout: () => void }) {
+  const [servers, setServers] = useState<Server[]>([])
+  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [view, setView] = useState<View>('overview')
+  const [createOpen, setCreateOpen] = useState(false)
+  const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState('')
+
+  const loadServers = useCallback(async () => {
+    try {
+      const values = await api.servers()
+      setServers(values)
+      setSelectedId((current) => current && values.some((item) => item.id === current) ? current : values[0]?.id ?? null)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Could not load servers')
+    }
+  }, [])
+
+  useEffect(() => { void loadServers() }, [loadServers])
+  useEffect(() => {
+    const timer = window.setInterval(() => void loadServers(), 5000)
+    return () => window.clearInterval(timer)
+  }, [loadServers])
+
+  const selected = servers.find((server) => server.id === selectedId) ?? null
+
+  async function action(name: 'install' | 'start' | 'stop' | 'restart') {
+    if (!selected) return
+    setBusy(name)
+    setError('')
+    try {
+      const updated = await api.action(selected.id, name)
+      setServers((current) => current.map((item) => item.id === updated.id ? updated : item))
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Action failed')
+    } finally {
+      setBusy('')
+    }
+  }
+
+  return (
+    <div className="min-h-screen bg-[#090a0c] text-zinc-100">
+      <aside className={`fixed inset-y-0 left-0 z-40 flex w-64 flex-col border-r border-zinc-800/80 bg-[#0c0d10] transition-transform lg:translate-x-0 ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}`}>
+        <div className="flex h-[73px] items-center justify-between border-b border-zinc-800/70 px-5">
+          <Brand />
+          <button className="icon-btn lg:hidden" onClick={() => setSidebarOpen(false)} aria-label="Close menu"><X size={17} /></button>
+        </div>
+        <nav className="flex-1 overflow-y-auto px-3 py-5">
+          <p className="section-label px-2">Workspace</p>
+          <button className={`nav-item ${view === 'overview' ? 'nav-active' : ''}`} onClick={() => { setView('overview'); setSidebarOpen(false) }}>
+            <Gauge size={17} /> Overview
+          </button>
+          <div className="mb-2 mt-7 flex items-center justify-between px-2">
+            <p className="section-label">Servers</p>
+            <button onClick={() => setCreateOpen(true)} className="rounded p-1 text-zinc-600 transition hover:bg-zinc-800 hover:text-zinc-300" aria-label="Add server"><Plus size={15} /></button>
+          </div>
+          <div className="space-y-1">
+            {servers.map((server) => (
+              <button key={server.id} className={`nav-item ${selectedId === server.id ? 'nav-active' : ''}`} onClick={() => { setSelectedId(server.id); setView('overview'); setSidebarOpen(false) }}>
+                <span className={`status-dot ${server.status === 'running' ? 'bg-emerald-400' : server.status === 'crashed' ? 'bg-red-400' : 'bg-zinc-600'}`} />
+                <span className="min-w-0 flex-1 truncate text-left">{server.name}</span>
+                <span className="text-[11px] text-zinc-600">{server.config.game_version}</span>
+              </button>
+            ))}
+            {servers.length === 0 && <p className="px-2 py-3 text-sm text-zinc-600">No servers yet</p>}
+          </div>
+          {selected && (
+            <div className="mt-7">
+              <p className="section-label px-2">Manage</p>
+              <button className={`nav-item ${view === 'console' ? 'nav-active' : ''}`} onClick={() => { setView('console'); setSidebarOpen(false) }}><Terminal size={17} /> Console</button>
+              {selected.capabilities.includes('mods') && (
+                <button className={`nav-item ${view === 'mods' ? 'nav-active' : ''}`} onClick={() => { setView('mods'); setSidebarOpen(false) }}><Boxes size={17} /> Mods</button>
+              )}
+              <button disabled className="nav-item opacity-45"><Users size={17} /> Players <span className="ml-auto text-[10px]">Soon</span></button>
+              <button disabled className="nav-item opacity-45"><Settings size={17} /> Settings <span className="ml-auto text-[10px]">Soon</span></button>
+            </div>
+          )}
+        </nav>
+        <div className="border-t border-zinc-800/70 p-3">
+          <button className="nav-item" onClick={onLogout}><LogOut size={16} /> Sign out</button>
+        </div>
+      </aside>
+
+      {sidebarOpen && <button className="fixed inset-0 z-30 bg-black/70 lg:hidden" onClick={() => setSidebarOpen(false)} aria-label="Close menu overlay" />}
+
+      <main className="lg:pl-64">
+        <header className="sticky top-0 z-20 flex h-[73px] items-center justify-between border-b border-zinc-800/70 bg-[#090a0c]/90 px-4 backdrop-blur-xl sm:px-7 lg:px-9">
+          <div className="flex min-w-0 items-center gap-3">
+            <button className="icon-btn lg:hidden" onClick={() => setSidebarOpen(true)} aria-label="Open menu"><Menu size={18} /></button>
+            {selected ? (
+              <>
+                <div className="hidden size-8 place-items-center rounded-lg border border-zinc-800 bg-zinc-900 sm:grid"><ServerIcon size={15} className="text-zinc-400" /></div>
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2"><h1 className="truncate text-sm font-medium">{selected.name}</h1><StatusBadge status={selected.status} /></div>
+                  <p className="mt-0.5 text-xs text-zinc-600">{selected.adapter === 'minecraft-fabric' ? 'Minecraft Java · Fabric' : selected.adapter}</p>
+                </div>
+              </>
+            ) : <h1 className="text-sm font-medium">Overview</h1>}
+          </div>
+          {selected && (
+            <div className="flex items-center gap-2">
+              {!selected.installed ? (
+                <button className="btn-primary" disabled={Boolean(busy)} onClick={() => void action('install')}><Download size={15} /> <span className="hidden sm:inline">{busy === 'install' ? 'Installing…' : 'Install server'}</span></button>
+              ) : selected.status === 'running' ? (
+                <>
+                  <button className="btn-secondary hidden sm:flex" disabled={Boolean(busy)} onClick={() => void action('restart')}><RefreshCw size={14} className={busy === 'restart' ? 'animate-spin' : ''} /> Restart</button>
+                  <button className="btn-danger" disabled={Boolean(busy)} onClick={() => void action('stop')}><Square size={13} fill="currentColor" /> <span className="hidden sm:inline">Stop</span></button>
+                </>
+              ) : (
+                <button className="btn-primary" disabled={Boolean(busy)} onClick={() => void action('start')}><Play size={14} fill="currentColor" /> {busy === 'start' ? 'Starting…' : 'Start'}</button>
+              )}
+              <button className="icon-btn" aria-label="More actions"><MoreHorizontal size={18} /></button>
+            </div>
+          )}
+        </header>
+
+        <div className="mx-auto max-w-[1500px] p-4 sm:p-7 lg:p-9">
+          {error && <div className="mb-5 flex items-center justify-between rounded-lg border border-red-500/20 bg-red-500/5 px-4 py-3 text-sm text-red-300"><span>{error}</span><button onClick={() => setError('')}><X size={15} /></button></div>}
+          {!selected ? <EmptyState onCreate={() => setCreateOpen(true)} /> : view === 'mods' ? (
+            <ModsView server={selected} setError={setError} />
+          ) : view === 'console' ? (
+            <ConsoleView server={selected} full />
+          ) : (
+            <Overview server={selected} onNavigate={setView} />
+          )}
+        </div>
+      </main>
+      {createOpen && <CreateServerModal onClose={() => setCreateOpen(false)} onCreated={(server) => { setServers((current) => [...current, server]); setSelectedId(server.id); setCreateOpen(false) }} />}
+    </div>
+  )
+}
+
+function StatusBadge({ status }: { status: Server['status'] }) {
+  const labels = { running: 'Online', stopped: 'Offline', crashed: 'Crashed', not_installed: 'Not installed' }
+  const classes = status === 'running' ? 'status-online' : status === 'crashed' ? 'status-error' : 'status-offline'
+  return <span className={`status-badge ${classes}`}>{labels[status]}</span>
+}
+
+function EmptyState({ onCreate }: { onCreate: () => void }) {
+  return (
+    <div className="grid min-h-[68vh] place-items-center">
+      <div className="max-w-md text-center">
+        <div className="mx-auto mb-5 grid size-12 place-items-center rounded-xl border border-zinc-800 bg-zinc-900/60 text-zinc-400"><ServerIcon size={21} /></div>
+        <h2 className="text-lg font-semibold tracking-tight">Add your first server</h2>
+        <p className="mt-2 text-sm leading-6 text-zinc-500">BLSM keeps game processes independent and gives you a focused place to operate them.</p>
+        <button className="btn-primary mx-auto mt-6" onClick={onCreate}><CirclePlus size={16} /> New server</button>
+      </div>
+    </div>
+  )
+}
+
+function Overview({ server, onNavigate }: { server: Server; onNavigate: (view: View) => void }) {
+  const [stats, setStats] = useState<Stats>({ memory_mb: 0, cpu_percent: null, uptime_seconds: 0 })
+  useEffect(() => {
+    const load = () => api.stats(server.id).then(setStats).catch(() => undefined)
+    void load()
+    const timer = window.setInterval(load, 3000)
+    return () => window.clearInterval(timer)
+  }, [server.id])
+  const memoryPercent = stats.memory_limit_mb ? Math.min(100, stats.memory_mb / stats.memory_limit_mb * 100) : 0
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h2 className="page-title">Overview</h2>
+        <p className="page-subtitle">Runtime health and recent server activity.</p>
+      </div>
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <Metric icon={<Activity size={17} />} label="Status" value={server.status === 'running' ? 'Operational' : server.status === 'crashed' ? 'Needs attention' : 'Stopped'} detail={server.status === 'running' ? `PID ${stats.pid ?? '—'}` : 'No active process'} />
+        <Metric icon={<MemoryStick size={17} />} label="Memory" value={`${stats.memory_mb.toFixed(0)} MB`} detail={`of ${(stats.memory_limit_mb ?? server.config.memory_mb ?? 0).toLocaleString()} MB allocated`} progress={memoryPercent} />
+        <Metric icon={<Gauge size={17} />} label="Uptime" value={formatDuration(stats.uptime_seconds)} detail={server.status === 'running' ? 'Since latest start' : 'Server is offline'} />
+        <Metric icon={<Users size={17} />} label="Players" value="—" detail="Available when server responds" />
+      </div>
+      {!server.installed && (
+        <div className="flex gap-4 rounded-xl border border-blue-500/20 bg-blue-500/[0.045] p-5">
+          <div className="grid size-9 shrink-0 place-items-center rounded-lg bg-blue-500/10 text-blue-300"><Download size={17} /></div>
+          <div><h3 className="text-sm font-medium text-zinc-200">Ready to install</h3><p className="mt-1 text-sm leading-6 text-zinc-500">BLSM will fetch the selected Fabric launcher and prepare a detached Minecraft server process. Use “Install server” above when ready.</p></div>
+        </div>
+      )}
+      <div className="grid gap-6 xl:grid-cols-[minmax(0,1.55fr)_minmax(290px,0.65fr)]">
+        <section className="panel min-w-0 overflow-hidden">
+          <div className="panel-header"><div><h3 className="panel-title">Live console</h3><p className="panel-description">Latest server output</p></div><button className="text-button" onClick={() => onNavigate('console')}>Open console</button></div>
+          <ConsoleView server={server} embedded />
+        </section>
+        <section className="panel">
+          <div className="panel-header"><div><h3 className="panel-title">Server details</h3><p className="panel-description">Current configuration</p></div></div>
+          <dl className="divide-y divide-zinc-800/70 px-5">
+            <Detail label="Software" value="Fabric" />
+            <Detail label="Game version" value={server.config.game_version ?? '—'} />
+            <Detail label="Port" value={String(server.config.server_port ?? '—')} mono />
+            <Detail label="Memory" value={`${server.config.memory_mb?.toLocaleString() ?? '—'} MB`} />
+          </dl>
+        </section>
+      </div>
+    </div>
+  )
+}
+
+function Metric({ icon, label, value, detail, progress }: { icon: React.ReactNode; label: string; value: string; detail: string; progress?: number }) {
+  return (
+    <div className="panel p-5">
+      <div className="flex items-center gap-2 text-sm text-zinc-500">{icon}<span>{label}</span></div>
+      <div className="mt-5 text-2xl font-semibold tracking-[-0.035em] text-zinc-100">{value}</div>
+      <div className="mt-1.5 text-xs text-zinc-600">{detail}</div>
+      {progress !== undefined && <div className="mt-4 h-1 overflow-hidden rounded-full bg-zinc-800"><div className="h-full rounded-full bg-blue-500 transition-all" style={{ width: `${progress}%` }} /></div>}
+    </div>
+  )
+}
+
+function Detail({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
+  return <div className="flex items-center justify-between py-4 text-sm"><dt className="text-zinc-500">{label}</dt><dd className={mono ? 'font-mono text-xs text-zinc-300' : 'text-zinc-300'}>{value}</dd></div>
+}
+
+function ConsoleView({ server, embedded = false, full = false }: { server: Server; embedded?: boolean; full?: boolean }) {
+  const [output, setOutput] = useState('')
+  const [command, setCommand] = useState('')
+  const [connected, setConnected] = useState(false)
+  const scrollRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    setOutput('')
+    let socket: WebSocket | undefined
+    let disposed = false
+    void api.socketToken().then(({ token }) => {
+      if (disposed) return
+      const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
+      socket = new WebSocket(`${protocol}//${location.host}/ws/servers/${server.id}/console?token=${encodeURIComponent(token)}`)
+      socket.onopen = () => setConnected(true)
+      socket.onclose = () => setConnected(false)
+      socket.onmessage = (event) => {
+        const message = JSON.parse(event.data) as { data: string }
+        setOutput((current) => (current + message.data).split('\n').slice(-600).join('\n'))
+      }
+    }).catch(() => setConnected(false))
+    return () => {
+      disposed = true
+      socket?.close()
+    }
+  }, [server.id])
+
+  useEffect(() => { if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight }, [output])
+
+  async function send(event: FormEvent) {
+    event.preventDefault()
+    const value = command.trim()
+    if (!value) return
+    setCommand('')
+    setOutput((current) => `${current}\n> ${value}\n`)
+    try {
+      const response = await api.command(server.id, value)
+      if (response.response) setOutput((current) => `${current}${response.response}\n`)
+    } catch (reason) {
+      setOutput((current) => `${current}[BLSM] ${reason instanceof Error ? reason.message : 'Command failed'}\n`)
+    }
+  }
+
+  const terminal = (
+    <>
+      <div ref={scrollRef} className={`${full ? 'h-[calc(100vh-310px)] min-h-[420px]' : embedded ? 'h-[330px]' : 'h-[480px]'} overflow-y-auto bg-[#07080a] p-4 font-mono text-[13px] leading-[1.65] text-zinc-400`}>
+        {output ? <pre className="whitespace-pre-wrap break-words font-inherit">{output}</pre> : <div className="grid h-full place-items-center text-center text-zinc-700"><div><Command className="mx-auto mb-3" size={20} /><p>{server.installed ? 'Waiting for server output…' : 'Install the server to begin.'}</p></div></div>}
+      </div>
+      <form onSubmit={send} className="flex items-center border-t border-zinc-800/80 bg-[#0b0c0f] px-4 py-3">
+        <span className="mr-3 font-mono text-sm text-blue-400">›</span>
+        <input className="min-w-0 flex-1 bg-transparent font-mono text-[13px] text-zinc-200 outline-none placeholder:text-zinc-700" value={command} onChange={(event) => setCommand(event.target.value)} disabled={server.status !== 'running'} placeholder={server.status === 'running' ? 'Enter a command…' : 'Start the server to send commands'} aria-label="Server command" />
+        <span className="ml-3 hidden text-xs text-zinc-700 sm:block">Press Enter</span>
+      </form>
+    </>
+  )
+
+  if (embedded) return terminal
+  return (
+    <div className="space-y-6">
+      <div className="flex items-end justify-between"><div><h2 className="page-title">Console</h2><p className="page-subtitle">Live output and direct command access.</p></div><span className="flex items-center gap-2 text-xs text-zinc-600"><span className={`status-dot ${connected ? 'bg-emerald-400' : 'bg-zinc-600'}`} />{connected ? 'Live' : 'Disconnected'}</span></div>
+      <section className="panel overflow-hidden">{terminal}</section>
+    </div>
+  )
+}
+
+function ModsView({ server, setError }: { server: Server; setError: (error: string) => void }) {
+  const [query, setQuery] = useState('')
+  const [results, setResults] = useState<ModResult[]>([])
+  const [installed, setInstalled] = useState<InstalledMod[]>([])
+  const [loading, setLoading] = useState(false)
+  const [working, setWorking] = useState('')
+
+  const loadInstalled = useCallback(() => api.installedMods(server.id).then(setInstalled).catch((reason) => setError(String(reason))), [server.id, setError])
+  useEffect(() => { void loadInstalled() }, [loadInstalled])
+
+  async function search(event: FormEvent) {
+    event.preventDefault()
+    setLoading(true)
+    try { setResults(await api.searchMods(server.id, query)) }
+    catch (reason) { setError(reason instanceof Error ? reason.message : 'Search failed') }
+    finally { setLoading(false) }
+  }
+  async function install(mod: ModResult) {
+    setWorking(mod.project_id)
+    try { await api.installMod(server.id, mod); await loadInstalled() }
+    catch (reason) { setError(reason instanceof Error ? reason.message : 'Install failed') }
+    finally { setWorking('') }
+  }
+  async function remove(projectId: string) {
+    setWorking(projectId)
+    try { await api.removeMod(server.id, projectId); await loadInstalled() }
+    catch (reason) { setError(reason instanceof Error ? reason.message : 'Remove failed') }
+    finally { setWorking('') }
+  }
+  async function update(projectId: string) {
+    setWorking(projectId)
+    try { await api.updateMod(server.id, projectId); await loadInstalled() }
+    catch (reason) { setError(reason instanceof Error ? reason.message : 'Update failed') }
+    finally { setWorking('') }
+  }
+  const installedIds = useMemo(() => new Set(installed.map((mod) => mod.project_id)), [installed])
+
+  return (
+    <div className="space-y-7">
+      <div><h2 className="page-title">Mods</h2><p className="page-subtitle">Fabric mods compatible with Minecraft {server.config.game_version}.</p></div>
+      <form onSubmit={search} className="relative max-w-2xl"><Search className="absolute left-3.5 top-1/2 -translate-y-1/2 text-zinc-600" size={17} /><input className="input h-11 pl-10 pr-24" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search Modrinth…" /><button className="absolute right-1.5 top-1.5 rounded-md bg-zinc-800 px-3 py-1.5 text-sm text-zinc-300 transition hover:bg-zinc-700">{loading ? 'Searching…' : 'Search'}</button></form>
+      {installed.length > 0 && (
+        <section>
+          <div className="mb-3 flex items-center gap-2"><PackageCheck size={16} className="text-zinc-500" /><h3 className="text-sm font-medium">Installed</h3><span className="text-xs text-zinc-600">{installed.length}</span></div>
+          <div className="panel divide-y divide-zinc-800/70">
+            {installed.map((mod) => <div key={mod.project_id} className="flex items-center gap-4 p-4"><div className="grid size-10 place-items-center rounded-lg border border-zinc-800 bg-zinc-900 text-zinc-500"><Box size={17} /></div><div className="min-w-0 flex-1"><p className="truncate text-sm font-medium text-zinc-200">{mod.title}</p><p className="mt-1 truncate font-mono text-xs text-zinc-600">{mod.filename}</p></div><button disabled={working === mod.project_id} onClick={() => void update(mod.project_id)} className="icon-btn" aria-label={`Check ${mod.title} for updates`}><RefreshCw size={15} className={working === mod.project_id ? 'animate-spin' : ''} /></button><button disabled={working === mod.project_id} onClick={() => void remove(mod.project_id)} className="icon-btn text-zinc-500 hover:text-red-300" aria-label={`Remove ${mod.title}`}><Trash2 size={15} /></button></div>)}
+          </div>
+        </section>
+      )}
+      <section>
+        {results.length > 0 && <h3 className="mb-3 text-sm font-medium">Search results</h3>}
+        <div className="grid gap-3 xl:grid-cols-2">
+          {results.map((mod) => {
+            const isInstalled = installedIds.has(mod.project_id)
+            return <article key={mod.project_id} className="panel flex gap-4 p-4"><div className="grid size-12 shrink-0 place-items-center overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900 text-zinc-600">{mod.icon_url ? <img src={mod.icon_url} alt="" className="size-full object-cover" /> : <Box size={19} />}</div><div className="min-w-0 flex-1"><div className="flex items-start justify-between gap-3"><div><h4 className="text-sm font-medium text-zinc-200">{mod.title}</h4><p className="mt-0.5 text-xs text-zinc-600">by {mod.author} · {formatDownloads(mod.downloads)} downloads</p></div><button disabled={working === mod.project_id || isInstalled} onClick={() => void install(mod)} className={isInstalled ? 'btn-secondary shrink-0 opacity-60' : 'btn-primary shrink-0'}>{working === mod.project_id ? <RefreshCw size={14} className="animate-spin" /> : isInstalled ? <PackageCheck size={14} /> : <Download size={14} />}{isInstalled ? 'Installed' : 'Install'}</button></div><p className="mt-3 line-clamp-2 text-sm leading-5 text-zinc-500">{mod.description}</p></div></article>
+          })}
+        </div>
+        {!loading && results.length === 0 && <div className="grid min-h-64 place-items-center rounded-xl border border-dashed border-zinc-800 text-center"><div><Boxes className="mx-auto text-zinc-700" size={23} /><p className="mt-3 text-sm text-zinc-500">Search more than 50,000 projects on Modrinth</p><p className="mt-1 text-xs text-zinc-700">Only compatible Fabric versions are shown.</p></div></div>}
+      </section>
+    </div>
+  )
+}
+
+function CreateServerModal({ onClose, onCreated }: { onClose: () => void; onCreated: (server: Server) => void }) {
+  const [name, setName] = useState('Minecraft Server')
+  const [version, setVersion] = useState('1.21.4')
+  const [memory, setMemory] = useState(4096)
+  const [eula, setEula] = useState(false)
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+  async function submit(event: FormEvent) {
+    event.preventDefault(); setBusy(true); setError('')
+    try { onCreated(await api.createServer({ name, adapter: 'minecraft-fabric', game_version: version, memory_mb: memory, server_port: 25565, rcon_port: 25575, accept_eula: eula })) }
+    catch (reason) { setError(reason instanceof Error ? reason.message : 'Could not create server'); setBusy(false) }
+  }
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-black/75 p-4 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="create-title">
+      <form onSubmit={submit} className="panel w-full max-w-lg shadow-2xl shadow-black/50">
+        <div className="panel-header"><div><h2 id="create-title" className="text-base font-semibold">New game server</h2><p className="panel-description">Create a managed Fabric instance.</p></div><button type="button" className="icon-btn" onClick={onClose}><X size={17} /></button></div>
+        <div className="space-y-5 p-5">
+          <label className="field-label">Server name<input required className="input mt-2" value={name} onChange={(event) => setName(event.target.value)} /></label>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <label className="field-label">Game version<input required pattern="[0-9A-Za-z.+_-]+" className="input mt-2" value={version} onChange={(event) => setVersion(event.target.value)} /></label>
+            <label className="field-label">Memory<select className="input mt-2" value={memory} onChange={(event) => setMemory(Number(event.target.value))}><option value={2048}>2 GB</option><option value={4096}>4 GB</option><option value={6144}>6 GB</option><option value={8192}>8 GB</option><option value={10240}>10 GB</option><option value={12288}>12 GB</option></select></label>
+          </div>
+          <label className="flex cursor-pointer gap-3 rounded-lg border border-zinc-800 bg-zinc-900/40 p-4"><input type="checkbox" checked={eula} onChange={(event) => setEula(event.target.checked)} className="mt-0.5 size-4 accent-blue-500" /><span><span className="block text-sm text-zinc-300">Accept the Minecraft EULA</span><span className="mt-1 block text-xs leading-5 text-zinc-600">Required before BLSM can install and start the server. You confirm you have reviewed Mojang's EULA.</span></span></label>
+          {error && <p className="text-sm text-red-300">{error}</p>}
+        </div>
+        <div className="flex justify-end gap-2 border-t border-zinc-800/70 p-4"><button type="button" className="btn-secondary" onClick={onClose}>Cancel</button><button disabled={busy || !eula} className="btn-primary">{busy ? <RefreshCw size={14} className="animate-spin" /> : <Plus size={15} />} Create server</button></div>
+      </form>
+    </div>
+  )
+}
+
+function formatDuration(seconds: number): string {
+  if (!seconds) return '0m'
+  const days = Math.floor(seconds / 86400)
+  const hours = Math.floor((seconds % 86400) / 3600)
+  const minutes = Math.floor((seconds % 3600) / 60)
+  return days ? `${days}d ${hours}h` : hours ? `${hours}h ${minutes}m` : `${minutes}m`
+}
+
+function formatDownloads(value: number): string {
+  return new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 }).format(value)
+}
+
+export default App

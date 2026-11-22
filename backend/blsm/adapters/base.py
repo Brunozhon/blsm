@@ -1,0 +1,58 @@
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from enum import Enum
+from pathlib import Path
+from typing import Any
+
+
+class AdapterCapability(str, Enum):
+    CONSOLE = "console"
+    MODS = "mods"
+    PLAYERS = "players"
+    GAME_RULES = "game_rules"
+    FILES = "files"
+    BACKUPS = "backups"
+
+
+@dataclass(frozen=True, slots=True)
+class InstallProgress:
+    phase: str
+    detail: str
+    percent: int
+
+
+class ServerAdapter(ABC):
+    key: str
+    display_name: str
+    capabilities: frozenset[AdapterCapability]
+
+    @abstractmethod
+    async def install(self, path: Path, config: dict[str, Any]) -> dict[str, Any]:
+        """Install or update server files and return normalized configuration."""
+
+    @abstractmethod
+    def launch_command(self, path: Path, config: dict[str, Any]) -> list[str]:
+        """Return a command without shell interpolation."""
+
+    @abstractmethod
+    async def send_command(self, path: Path, config: dict[str, Any], command: str) -> str:
+        """Send a console command through a game-native remote protocol."""
+
+    @abstractmethod
+    async def graceful_stop(self, path: Path, config: dict[str, Any]) -> None:
+        """Ask the game server to stop cleanly."""
+
+    @abstractmethod
+    def is_installed(self, path: Path) -> bool:
+        """Whether enough server files exist to launch."""
+
+    def public_metadata(self) -> dict[str, Any]:
+        return {
+            "key": self.key,
+            "display_name": self.display_name,
+            "capabilities": sorted(self.capabilities),
+        }
+
+

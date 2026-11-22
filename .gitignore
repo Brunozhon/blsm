@@ -1,0 +1,16 @@
+node_modules/
+frontend/dist/
+frontend/node_modules/
+.venv/
+.python-deps/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+.env
+data/
+*.db
+*.db-shm
+*.db-wal
+
