@@ -17,8 +17,16 @@ from fastapi import (
     WebSocketDisconnect,
 )
 
+from .adapters.base import AdapterCapability
 from .auth import hash_password, require_admin, verify_password
-from .schemas import ConsoleCommand, ModInstall, PasswordPayload, ServerCreate
+from .schemas import (
+    ConsoleCommand,
+    ModInstall,
+    PasswordPayload,
+    PlayerAccess,
+    ServerCreate,
+    WhitelistSetting,
+)
 
 router = APIRouter(prefix="/api")
 
@@ -171,6 +179,94 @@ async def restart_server(request: Request, server_id: str) -> dict[str, Any]:
 @router.get("/servers/{server_id}/stats", dependencies=[Depends(require_admin)])
 async def server_stats(request: Request, server_id: str) -> dict[str, Any]:
     return request.app.state.processes.stats(_server_or_404(request, server_id))
+
+
+def _player_adapter(
+    request: Request,
+    server: dict[str, Any],
+    capability: AdapterCapability | None = None,
+) -> Any:
+    adapter = request.app.state.adapters[server["adapter"]]
+    player_capabilities = {
+        AdapterCapability.PLAYERS,
+        AdapterCapability.WHITELIST,
+        AdapterCapability.OPERATORS,
+    }
+    supported = capability in adapter.capabilities if capability else bool(
+        player_capabilities & adapter.capabilities
+    )
+    if not supported:
+        raise HTTPException(
+            status_code=404, detail="This server does not support player management"
+        )
+    return adapter
+
+
+def _require_running(request: Request, server: dict[str, Any]) -> None:
+    if request.app.state.processes.status(server) != "running":
+        raise HTTPException(status_code=409, detail="Start the server to manage players")
+
+
+@router.get("/servers/{server_id}/players", dependencies=[Depends(require_admin)])
+async def player_state(request: Request, server_id: str) -> dict[str, Any]:
+    server = _server_or_404(request, server_id)
+    adapter = _player_adapter(request, server)
+    running = request.app.state.processes.status(server) == "running"
+    try:
+        return await adapter.player_state(Path(server["path"]), server["config"], running)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.post("/servers/{server_id}/players/whitelist", dependencies=[Depends(require_admin)])
+async def set_whitelist_member(
+    request: Request, server_id: str, payload: PlayerAccess
+) -> dict[str, str]:
+    server = _server_or_404(request, server_id)
+    adapter = _player_adapter(request, server, AdapterCapability.WHITELIST)
+    _require_running(request, server)
+    try:
+        response = await adapter.set_whitelist_member(
+            Path(server["path"]), server["config"], payload.name, payload.enabled
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {"response": response}
+
+
+@router.post("/servers/{server_id}/players/operators", dependencies=[Depends(require_admin)])
+async def set_operator(
+    request: Request, server_id: str, payload: PlayerAccess
+) -> dict[str, str]:
+    server = _server_or_404(request, server_id)
+    adapter = _player_adapter(request, server, AdapterCapability.OPERATORS)
+    _require_running(request, server)
+    try:
+        response = await adapter.set_operator(
+            Path(server["path"]), server["config"], payload.name, payload.enabled
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {"response": response}
+
+
+@router.put(
+    "/servers/{server_id}/players/whitelist/enabled",
+    dependencies=[Depends(require_admin)],
+)
+async def set_whitelist_enabled(
+    request: Request, server_id: str, payload: WhitelistSetting
+) -> dict[str, str]:
+    server = _server_or_404(request, server_id)
+    adapter = _player_adapter(request, server, AdapterCapability.WHITELIST)
+    _require_running(request, server)
+    try:
+        response = await adapter.set_whitelist_enabled(
+            Path(server["path"]), server["config"], payload.enabled
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {"response": response}
 
 
 @router.post("/servers/{server_id}/console", dependencies=[Depends(require_admin)])

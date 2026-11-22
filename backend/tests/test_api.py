@@ -121,4 +121,22 @@ async def test_first_run_auth_and_server_creation(tmp_path: Path) -> None:
         assert body["status"] == "not_installed"
         assert "mods" in body["capabilities"]
         assert "rcon_password" not in body["config"]
+        player_status, players = await request_json(
+            app,
+            "GET",
+            f"/api/servers/{body['id']}/players",
+            headers={"Authorization": f"Bearer {setup['token']}"},
+        )
+        assert player_status == 200
+        assert players["online"] == []
+        assert players["whitelisted"] == []
+        mutation_status, mutation = await request_json(
+            app,
+            "POST",
+            f"/api/servers/{body['id']}/players/operators",
+            {"name": "Alex", "enabled": True},
+            {"Authorization": f"Bearer {setup['token']}"},
+        )
+        assert mutation_status == 409
+        assert mutation["detail"] == "Start the server to manage players"
 

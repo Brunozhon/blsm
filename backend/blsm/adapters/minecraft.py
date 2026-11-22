@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import secrets
 import shutil
@@ -23,6 +24,8 @@ class MinecraftFabricAdapter(ServerAdapter):
             AdapterCapability.CONSOLE,
             AdapterCapability.MODS,
             AdapterCapability.PLAYERS,
+            AdapterCapability.WHITELIST,
+            AdapterCapability.OPERATORS,
             AdapterCapability.GAME_RULES,
             AdapterCapability.FILES,
             AdapterCapability.BACKUPS,
@@ -160,11 +163,99 @@ class MinecraftFabricAdapter(ServerAdapter):
             command,
         )
 
+    async def player_state(
+        self, path: Path, config: dict[str, Any], query_online: bool
+    ) -> dict[str, Any]:
+        properties = self._read_properties(path / "server.properties")
+        maximum = int(properties.get("max-players", "20"))
+        online: list[str] = []
+        if query_online:
+            response = await self.send_command(path, config, "list")
+            online, reported_maximum = self._parse_online_players(response)
+            if reported_maximum is not None:
+                maximum = reported_maximum
+        return {
+            "online": online,
+            "online_count": len(online),
+            "max_players": maximum,
+            "whitelist_enabled": properties.get("white-list", "false").lower() == "true",
+            "whitelisted": self._read_player_names(path / "whitelist.json"),
+            "operators": self._read_player_names(path / "ops.json"),
+        }
+
+    async def set_whitelist_member(
+        self, path: Path, config: dict[str, Any], name: str, enabled: bool
+    ) -> str:
+        safe_name = self._validate_player_name(name)
+        action = "add" if enabled else "remove"
+        return await self.send_command(path, config, f"whitelist {action} {safe_name}")
+
+    async def set_operator(
+        self, path: Path, config: dict[str, Any], name: str, enabled: bool
+    ) -> str:
+        safe_name = self._validate_player_name(name)
+        command = "op" if enabled else "deop"
+        return await self.send_command(path, config, f"{command} {safe_name}")
+
+    async def set_whitelist_enabled(
+        self, path: Path, config: dict[str, Any], enabled: bool
+    ) -> str:
+        response = await self.send_command(
+            path, config, f"whitelist {'on' if enabled else 'off'}"
+        )
+        properties_path = path / "server.properties"
+        properties = self._read_properties(properties_path)
+        properties["white-list"] = "true" if enabled else "false"
+        self._write_properties(properties_path, properties)
+        return response
+
     async def graceful_stop(self, path: Path, config: dict[str, Any]) -> None:
         await self.send_command(path, config, "stop")
 
     def is_installed(self, path: Path) -> bool:
         return (path / "fabric-server-launch.jar").is_file()
+
+    @staticmethod
+    def _validate_player_name(name: str) -> str:
+        if re.fullmatch(r"[A-Za-z0-9_]{1,16}", name) is None:
+            raise RuntimeError("Player names may only contain letters, numbers, and underscores")
+        return name
+
+    @staticmethod
+    def _read_player_names(path: Path) -> list[str]:
+        if not path.exists():
+            return []
+        try:
+            values = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"Could not read {path.name}") from exc
+        if not isinstance(values, list):
+            raise RuntimeError(f"Invalid player data in {path.name}")
+        names = {
+            entry["name"]
+            for entry in values
+            if isinstance(entry, dict)
+            and isinstance(entry.get("name"), str)
+            and entry["name"]
+        }
+        return sorted(names, key=str.casefold)
+
+    @staticmethod
+    def _parse_online_players(response: str) -> tuple[list[str], int | None]:
+        cleaned = re.sub(r"§.", "", response).strip()
+        match = re.search(
+            r"(\d+)\s+of a max of\s+(\d+)\s+players online\s*:?\s*(.*)$",
+            cleaned,
+            re.IGNORECASE,
+        )
+        if match is None:
+            raise RuntimeError("The server returned an unrecognized player list")
+        count = int(match.group(1))
+        maximum = int(match.group(2))
+        names = [name.strip() for name in match.group(3).split(",") if name.strip()]
+        if len(names) != count:
+            raise RuntimeError("The server returned an incomplete player list")
+        return names, maximum
 
     @staticmethod
     def _read_properties(path: Path) -> dict[str, str]:

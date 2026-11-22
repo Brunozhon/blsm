@@ -23,6 +23,15 @@ class ConsoleCommand(BaseModel):
     command: str = Field(min_length=1, max_length=512)
 
 
+class PlayerAccess(BaseModel):
+    name: str = Field(min_length=1, max_length=16, pattern=r"^[A-Za-z0-9_]+$")
+    enabled: bool
+
+
+class WhitelistSetting(BaseModel):
+    enabled: bool
+
+
 class ModInstall(BaseModel):
     project_id: str = Field(min_length=1, max_length=128)
     title: str | None = Field(default=None, max_length=256)

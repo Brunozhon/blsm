@@ -22,6 +22,15 @@ export interface Stats {
   pid?: number
 }
 
+export interface PlayerState {
+  online: string[]
+  online_count: number
+  max_players: number
+  whitelist_enabled: boolean
+  whitelisted: string[]
+  operators: string[]
+}
+
 export interface ModResult {
   project_id: string
   slug: string

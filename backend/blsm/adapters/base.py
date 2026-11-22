@@ -11,6 +11,8 @@ class AdapterCapability(str, Enum):
     CONSOLE = "console"
     MODS = "mods"
     PLAYERS = "players"
+    WHITELIST = "whitelist"
+    OPERATORS = "operators"
     GAME_RULES = "game_rules"
     FILES = "files"
     BACKUPS = "backups"
@@ -51,6 +53,30 @@ class ServerAdapter(ABC):
     def validate_environment(self, path: Path, config: dict[str, Any]) -> None:
         """Raise a useful error when host runtime requirements are not met."""
         return None
+
+    async def player_state(
+        self, path: Path, config: dict[str, Any], query_online: bool
+    ) -> dict[str, Any]:
+        """Return adapter-normalized player access and presence information."""
+        raise NotImplementedError("This server adapter does not manage players")
+
+    async def set_whitelist_member(
+        self, path: Path, config: dict[str, Any], name: str, enabled: bool
+    ) -> str:
+        """Add or remove a player from the server whitelist."""
+        raise NotImplementedError("This server adapter does not manage a whitelist")
+
+    async def set_operator(
+        self, path: Path, config: dict[str, Any], name: str, enabled: bool
+    ) -> str:
+        """Grant or revoke a player's operator role."""
+        raise NotImplementedError("This server adapter does not manage operators")
+
+    async def set_whitelist_enabled(
+        self, path: Path, config: dict[str, Any], enabled: bool
+    ) -> str:
+        """Enable or disable whitelist enforcement."""
+        raise NotImplementedError("This server adapter does not manage a whitelist")
 
     def public_metadata(self) -> dict[str, Any]:
         return {

@@ -4,6 +4,7 @@ import {
   Boxes,
   CirclePlus,
   Command,
+  Crown,
   Download,
   Gauge,
   LogOut,
@@ -17,18 +18,22 @@ import {
   Search,
   ServerIcon,
   Settings,
+  Shield,
   ShieldCheck,
+  ShieldOff,
   Square,
   Terminal,
   Trash2,
+  UserMinus,
+  UserPlus,
   Users,
   X,
 } from 'lucide-react'
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api, session } from './api'
-import type { InstalledMod, ModResult, Server, Stats } from './types'
+import type { InstalledMod, ModResult, PlayerState, Server, Stats } from './types'
 
-type View = 'overview' | 'console' | 'mods'
+type View = 'overview' | 'console' | 'mods' | 'players'
 
 function App() {
   const [authenticated, setAuthenticated] = useState(Boolean(session.get()))
@@ -230,7 +235,9 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
               {selected.capabilities.includes('mods') && (
                 <button className={`nav-item ${view === 'mods' ? 'nav-active' : ''}`} onClick={() => { setView('mods'); setSidebarOpen(false) }}><Boxes size={17} /> Mods</button>
               )}
-              <button disabled className="nav-item opacity-45"><Users size={17} /> Players <span className="ml-auto text-[10px]">Soon</span></button>
+              {selected.capabilities.some((capability) => ['players', 'whitelist', 'operators'].includes(capability)) && (
+                <button className={`nav-item ${view === 'players' ? 'nav-active' : ''}`} onClick={() => { setView('players'); setSidebarOpen(false) }}><Users size={17} /> Players</button>
+              )}
               <button disabled className="nav-item opacity-45"><Settings size={17} /> Settings <span className="ml-auto text-[10px]">Soon</span></button>
             </div>
           )}
@@ -277,6 +284,8 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
           {error && <div className="mb-5 flex items-center justify-between rounded-lg border border-red-500/20 bg-red-500/5 px-4 py-3 text-sm text-red-300"><span>{error}</span><button onClick={() => setError('')}><X size={15} /></button></div>}
           {!selected ? <EmptyState onCreate={() => setCreateOpen(true)} /> : view === 'mods' ? (
             <ModsView server={selected} setError={setError} />
+          ) : view === 'players' ? (
+            <PlayersView server={selected} setError={setError} />
           ) : view === 'console' ? (
             <ConsoleView server={selected} full />
           ) : (
@@ -310,12 +319,20 @@ function EmptyState({ onCreate }: { onCreate: () => void }) {
 
 function Overview({ server, onNavigate }: { server: Server; onNavigate: (view: View) => void }) {
   const [stats, setStats] = useState<Stats>({ memory_mb: 0, cpu_percent: null, uptime_seconds: 0 })
+  const [players, setPlayers] = useState<PlayerState | null>(null)
   useEffect(() => {
     const load = () => api.stats(server.id).then(setStats).catch(() => undefined)
     void load()
     const timer = window.setInterval(load, 3000)
     return () => window.clearInterval(timer)
   }, [server.id])
+  useEffect(() => {
+    if (!server.capabilities.includes('players')) return
+    const load = () => api.players(server.id).then(setPlayers).catch(() => undefined)
+    void load()
+    const timer = window.setInterval(load, 5000)
+    return () => window.clearInterval(timer)
+  }, [server.id, server.status])
   const memoryPercent = stats.memory_limit_mb ? Math.min(100, stats.memory_mb / stats.memory_limit_mb * 100) : 0
 
   return (
@@ -328,7 +345,7 @@ function Overview({ server, onNavigate }: { server: Server; onNavigate: (view: V
         <Metric icon={<Activity size={17} />} label="Status" value={server.status === 'running' ? 'Operational' : server.status === 'crashed' ? 'Needs attention' : 'Stopped'} detail={server.status === 'running' ? `PID ${stats.pid ?? '—'}` : 'No active process'} />
         <Metric icon={<MemoryStick size={17} />} label="Memory" value={`${stats.memory_mb.toFixed(0)} MB`} detail={`of ${(stats.memory_limit_mb ?? server.config.memory_mb ?? 0).toLocaleString()} MB allocated`} progress={memoryPercent} />
         <Metric icon={<Gauge size={17} />} label="Uptime" value={formatDuration(stats.uptime_seconds)} detail={server.status === 'running' ? 'Since latest start' : 'Server is offline'} />
-        <Metric icon={<Users size={17} />} label="Players" value="—" detail="Available when server responds" />
+        <Metric icon={<Users size={17} />} label="Players" value={players ? `${players.online_count} / ${players.max_players}` : '—'} detail={players ? (players.whitelist_enabled ? 'Whitelist enforced' : 'Whitelist disabled') : 'Waiting for server data'} />
       </div>
       {!server.installed && (
         <div className="flex gap-4 rounded-xl border border-blue-500/20 bg-blue-500/[0.045] p-5">
@@ -352,6 +369,132 @@ function Overview({ server, onNavigate }: { server: Server; onNavigate: (view: V
         </section>
       </div>
     </div>
+  )
+}
+
+function PlayersView({ server, setError }: { server: Server; setError: (error: string) => void }) {
+  const [state, setState] = useState<PlayerState | null>(null)
+  const [name, setName] = useState('')
+  const [busy, setBusy] = useState('')
+  const [notice, setNotice] = useState('')
+
+  const load = useCallback(async () => {
+    try { setState(await api.players(server.id)) }
+    catch (reason) { setError(reason instanceof Error ? reason.message : 'Could not load players') }
+  }, [server.id, setError])
+
+  useEffect(() => {
+    void load()
+    const timer = window.setInterval(() => void load(), 5000)
+    return () => window.clearInterval(timer)
+  }, [load])
+
+  async function change(kind: 'whitelist' | 'operator', playerName: string, enabled: boolean) {
+    const value = playerName.trim()
+    if (!/^[A-Za-z0-9_]{1,16}$/.test(value)) {
+      setError('Player names must be 1–16 letters, numbers, or underscores.')
+      return
+    }
+    setBusy(`${kind}:${value}`)
+    setNotice('')
+    try {
+      const result = kind === 'whitelist'
+        ? await api.setWhitelisted(server.id, value, enabled)
+        : await api.setOperator(server.id, value, enabled)
+      setNotice(result.response || `${value} was updated.`)
+      setName('')
+      await load()
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Player update failed')
+    } finally {
+      setBusy('')
+    }
+  }
+
+  async function toggleWhitelist() {
+    if (!state) return
+    const enabled = !state.whitelist_enabled
+    setBusy('whitelist-setting')
+    setNotice('')
+    try {
+      const result = await api.setWhitelistEnabled(server.id, enabled)
+      setNotice(result.response || `Whitelist ${enabled ? 'enabled' : 'disabled'}.`)
+      await load()
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Could not change whitelist enforcement')
+    } finally {
+      setBusy('')
+    }
+  }
+
+  const online = state?.online ?? []
+  const whitelisted = state?.whitelisted ?? []
+  const operators = state?.operators ?? []
+  const whitelistNames = new Set(whitelisted.map((player) => player.toLowerCase()))
+  const operatorNames = new Set(operators.map((player) => player.toLowerCase()))
+  const running = server.status === 'running'
+  const supportsPresence = server.capabilities.includes('players')
+  const supportsWhitelist = server.capabilities.includes('whitelist')
+  const supportsOperators = server.capabilities.includes('operators')
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+        <div><h2 className="page-title">Players</h2><p className="page-subtitle">Presence, whitelist access, and operator permissions.</p></div>
+        <button className="btn-secondary self-start sm:self-auto" onClick={() => void load()}><RefreshCw size={14} /> Refresh</button>
+      </div>
+
+      <div className="grid gap-3 sm:grid-cols-3">
+        {supportsPresence && <Metric icon={<Users size={17} />} label="Online now" value={state ? `${state.online_count} / ${state.max_players}` : '—'} detail={running ? 'Live from the server' : 'Server is offline'} />}
+        {supportsWhitelist && <Metric icon={<Shield size={17} />} label="Whitelisted" value={state ? String(whitelisted.length) : '—'} detail={state?.whitelist_enabled ? 'Enforcement enabled' : 'Enforcement disabled'} />}
+        {supportsOperators && <Metric icon={<Crown size={17} />} label="Operators" value={state ? String(operators.length) : '—'} detail="Full server privileges" />}
+      </div>
+
+      {!running && <div className="rounded-xl border border-amber-500/20 bg-amber-500/[0.045] px-4 py-3 text-sm text-amber-200/80">Start the server to change access or operator permissions. Saved lists remain visible while offline.</div>}
+
+      {(supportsWhitelist || supportsOperators) && <section className="panel">
+        <div className="panel-header">
+          <div><h3 className="panel-title">Access control</h3><p className="panel-description">Add a player by their exact Minecraft username</p></div>
+          {supportsWhitelist && <button className={state?.whitelist_enabled ? 'btn-secondary' : 'btn-primary'} disabled={!running || !state || busy === 'whitelist-setting'} onClick={() => void toggleWhitelist()}>
+            {state?.whitelist_enabled ? <ShieldOff size={14} /> : <ShieldCheck size={14} />}
+            {state?.whitelist_enabled ? 'Disable whitelist' : 'Enable whitelist'}
+          </button>}
+        </div>
+        <form className="flex flex-col gap-3 p-5 sm:flex-row" onSubmit={(event) => { event.preventDefault(); void change(supportsWhitelist ? 'whitelist' : 'operator', name, true) }}>
+          <input className="input min-w-0 flex-1" required maxLength={16} pattern="[A-Za-z0-9_]+" value={name} onChange={(event) => setName(event.target.value)} placeholder="PlayerName" aria-label="Minecraft player name" />
+          {supportsWhitelist && <button className="btn-secondary justify-center" disabled={!running || Boolean(busy)} type="submit"><UserPlus size={14} /> Add to whitelist</button>}
+          {supportsOperators && <button className="btn-primary justify-center" disabled={!running || Boolean(busy) || !/^[A-Za-z0-9_]{1,16}$/.test(name.trim())} type="button" onClick={() => void change('operator', name, true)}><Crown size={14} /> Make operator</button>}
+        </form>
+        {notice && <div className="border-t border-zinc-800/70 px-5 py-3 text-sm text-emerald-300/80">{notice}</div>}
+      </section>}
+
+      <div className="grid gap-5 xl:grid-cols-3">
+        {supportsPresence && <PlayerPanel title="Online now" description="Currently connected" icon={<Users size={16} />} empty={running ? 'No players are online.' : 'Server is offline.'} players={online}>
+          {(player) => (
+            <div className="flex gap-1">
+              {supportsWhitelist && <button className="icon-btn" disabled={!running || Boolean(busy) || whitelistNames.has(player.toLowerCase())} onClick={() => void change('whitelist', player, true)} aria-label={`Whitelist ${player}`} title="Add to whitelist"><ShieldCheck size={14} /></button>}
+              {supportsOperators && <button className="icon-btn" disabled={!running || Boolean(busy) || operatorNames.has(player.toLowerCase())} onClick={() => void change('operator', player, true)} aria-label={`Make ${player} an operator`} title="Make operator"><Crown size={14} /></button>}
+            </div>
+          )}
+        </PlayerPanel>}
+        {supportsWhitelist && <PlayerPanel title="Whitelist" description={state?.whitelist_enabled ? 'Enforced' : 'Not enforced'} icon={<Shield size={16} />} empty="No whitelisted players." players={whitelisted} online={online}>
+          {(player) => <button className="icon-btn text-zinc-500 hover:text-red-300" disabled={!running || Boolean(busy)} onClick={() => void change('whitelist', player, false)} aria-label={`Remove ${player} from whitelist`} title="Remove from whitelist"><UserMinus size={14} /></button>}
+        </PlayerPanel>}
+        {supportsOperators && <PlayerPanel title="Operators" description="Elevated privileges" icon={<Crown size={16} />} empty="No server operators." players={operators} online={online}>
+          {(player) => <button className="icon-btn text-zinc-500 hover:text-red-300" disabled={!running || Boolean(busy)} onClick={() => void change('operator', player, false)} aria-label={`Remove operator privileges from ${player}`} title="Deop player"><ShieldOff size={14} /></button>}
+        </PlayerPanel>}
+      </div>
+    </div>
+  )
+}
+
+function PlayerPanel({ title, description, icon, empty, players, online = [], children }: { title: string; description: string; icon: React.ReactNode; empty: string; players: string[]; online?: string[]; children: (player: string) => React.ReactNode }) {
+  const onlineNames = new Set(online.map((player) => player.toLowerCase()))
+  return (
+    <section className="panel overflow-hidden">
+      <div className="panel-header"><div><h3 className="panel-title flex items-center gap-2">{icon}{title}</h3><p className="panel-description">{description}</p></div><span className="text-xs text-zinc-600">{players.length}</span></div>
+      {players.length === 0 ? <p className="px-5 py-8 text-center text-sm text-zinc-600">{empty}</p> : <div className="divide-y divide-zinc-800/70">{players.map((player) => <div key={player.toLowerCase()} className="flex items-center gap-3 px-4 py-3"><div className="grid size-8 place-items-center rounded-lg border border-zinc-800 bg-zinc-900 text-xs font-medium text-zinc-400">{player.slice(0, 1).toUpperCase()}</div><div className="min-w-0 flex-1"><p className="truncate text-sm text-zinc-200">{player}</p>{onlineNames.has(player.toLowerCase()) && <p className="mt-0.5 flex items-center gap-1.5 text-[11px] text-emerald-400"><span className="status-dot bg-emerald-400" />Online</p>}</div>{children(player)}</div>)}</div>}
+    </section>
   )
 }
 

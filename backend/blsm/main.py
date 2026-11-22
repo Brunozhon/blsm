@@ -81,7 +81,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.sessions = SessionManager(read_or_create_secret(current_settings.data_dir))
         app.state.processes = ProcessManager(db, adapters)
         app.state.modrinth = ModrinthService(db)
-        yield
+        try:
+            yield
+        finally:
+            await app.state.processes.shutdown()
 
     app = FastAPI(
         title="Bruno's Little Server Manager",
@@ -94,7 +97,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         CORSMiddleware,
         allow_origins=list(current_settings.allowed_origins),
         allow_credentials=False,
-        allow_methods=["GET", "POST", "DELETE"],
+        allow_methods=["GET", "POST", "PUT", "DELETE"],
         allow_headers=["Authorization", "Content-Type"],
     )
     app.add_middleware(SecurityHeadersMiddleware)

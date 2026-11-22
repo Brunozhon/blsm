@@ -1,4 +1,4 @@
-import type { InstalledMod, ModResult, Server, Stats } from './types'
+import type { InstalledMod, ModResult, PlayerState, Server, Stats } from './types'
 
 const TOKEN_KEY = 'blsm_session'
 
@@ -47,6 +47,22 @@ export const api = {
     request<{ response: string }>(`/servers/${id}/console`, {
       method: 'POST',
       body: JSON.stringify({ command }),
+    }),
+  players: (id: string) => request<PlayerState>(`/servers/${id}/players`),
+  setWhitelisted: (id: string, name: string, enabled: boolean) =>
+    request<{ response: string }>(`/servers/${id}/players/whitelist`, {
+      method: 'POST',
+      body: JSON.stringify({ name, enabled }),
+    }),
+  setOperator: (id: string, name: string, enabled: boolean) =>
+    request<{ response: string }>(`/servers/${id}/players/operators`, {
+      method: 'POST',
+      body: JSON.stringify({ name, enabled }),
+    }),
+  setWhitelistEnabled: (id: string, enabled: boolean) =>
+    request<{ response: string }>(`/servers/${id}/players/whitelist/enabled`, {
+      method: 'PUT',
+      body: JSON.stringify({ enabled }),
     }),
   searchMods: (id: string, query: string) =>
     request<ModResult[]>(`/servers/${id}/mods/search?q=${encodeURIComponent(query)}`),

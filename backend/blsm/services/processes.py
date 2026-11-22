@@ -5,6 +5,8 @@ import os
 import signal
 import subprocess
 import time
+from contextlib import suppress
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -17,20 +19,42 @@ class ProcessError(RuntimeError):
     pass
 
 
+@dataclass(slots=True)
+class OwnedProcess:
+    process: subprocess.Popen[Any]
+    server_id: str
+    log_path: Path
+    startup_complete: bool = False
+    finalized: bool = False
+
+
 class ProcessManager:
-    def __init__(self, db: Database, adapters: dict[str, ServerAdapter]):
+    def __init__(
+        self,
+        db: Database,
+        adapters: dict[str, ServerAdapter],
+        *,
+        poll_interval: float = 0.25,
+        startup_grace: float = 1.0,
+    ):
         self.db = db
         self.adapters = adapters
         self._locks: dict[str, asyncio.Lock] = {}
         self._cpu_samples: dict[int, tuple[int, float]] = {}
+        self._owned_processes: dict[int, OwnedProcess] = {}
+        self._watch_tasks: set[asyncio.Task[None]] = set()
+        self._poll_interval = poll_interval
+        self._startup_grace = startup_grace
 
     def _lock(self, server_id: str) -> asyncio.Lock:
         return self._locks.setdefault(server_id, asyncio.Lock())
 
-    @staticmethod
-    def _pid_alive(pid: int | None) -> bool:
+    def _pid_alive(self, pid: int | None) -> bool:
         if not pid:
             return False
+        owned = self._owned_processes.get(pid)
+        if owned is not None:
+            return owned.process.poll() is None
         try:
             os.kill(pid, 0)
             stat = Path(f"/proc/{pid}/stat")
@@ -42,7 +66,7 @@ class ProcessManager:
         pid = server.get("pid")
         if self._pid_alive(pid):
             return "running"
-        if pid:
+        if pid or server.get("exit_code") is not None:
             return "crashed"
         path = Path(server["path"])
         adapter = self.adapters[server["adapter"]]
@@ -58,21 +82,57 @@ class ProcessManager:
                 raise ProcessError("Install the server before starting it")
             adapter.validate_environment(path, server["config"])
             log_path = path / "blsm-console.log"
-            log_handle = log_path.open("ab", buffering=0)
             try:
-                process = subprocess.Popen(
-                    adapter.launch_command(path, server["config"]),
-                    cwd=path,
-                    stdin=subprocess.DEVNULL,
-                    stdout=log_handle,
-                    stderr=subprocess.STDOUT,
-                    start_new_session=True,
-                    close_fds=True,
-                )
-            finally:
-                log_handle.close()
+                log_handle = log_path.open("ab", buffering=0)
+                try:
+                    process = subprocess.Popen(
+                        adapter.launch_command(path, server["config"]),
+                        cwd=path,
+                        stdin=subprocess.DEVNULL,
+                        stdout=log_handle,
+                        stderr=subprocess.STDOUT,
+                        start_new_session=True,
+                        close_fds=True,
+                    )
+                finally:
+                    log_handle.close()
+            except OSError as exc:
+                self.db.update_server_runtime(server["id"], None, None, -1)
+                self._append_supervisor_log(log_path, f"Could not start server: {exc}")
+                raise ProcessError(f"Could not start the server process: {exc}") from exc
+
             started_at = datetime.now(timezone.utc).isoformat()
-            self.db.update_server_runtime(server["id"], process.pid, started_at)
+            owned = OwnedProcess(process, server["id"], log_path)
+            self._owned_processes[process.pid] = owned
+            try:
+                self.db.update_server_runtime(server["id"], process.pid, started_at)
+            except Exception as exc:
+                with suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGTERM)
+                while process.poll() is None:
+                    await asyncio.sleep(self._poll_interval)
+                self._owned_processes.pop(process.pid, None)
+                self._append_supervisor_log(
+                    log_path, f"Could not persist process {process.pid}: {exc}"
+                )
+                raise ProcessError("Could not record the new server process") from exc
+
+            watch_task = asyncio.create_task(self._watch_process(process.pid))
+            self._watch_tasks.add(watch_task)
+            watch_task.add_done_callback(self._watch_tasks.discard)
+
+            deadline = asyncio.get_running_loop().time() + self._startup_grace
+            while asyncio.get_running_loop().time() < deadline:
+                if process.poll() is not None:
+                    self._finalize_process(process.pid)
+                    raise ProcessError(
+                        f"The server process exited during startup with code "
+                        f"{process.returncode}. Review {log_path.name} for details."
+                    )
+                await asyncio.sleep(
+                    min(self._poll_interval, max(0, deadline - asyncio.get_running_loop().time()))
+                )
+            owned.startup_complete = True
 
     async def stop(self, server: dict[str, Any], timeout: float = 30) -> None:
         async with self._lock(server["id"]):
@@ -90,6 +150,13 @@ class ProcessManager:
                 await asyncio.sleep(0.25)
             if self._pid_alive(pid):
                 os.killpg(int(pid), signal.SIGKILL)
+                kill_deadline = asyncio.get_running_loop().time() + 5
+                while (
+                    self._pid_alive(pid)
+                    and asyncio.get_running_loop().time() < kill_deadline
+                ):
+                    await asyncio.sleep(self._poll_interval)
+            self._finalize_process(int(pid))
             self.db.update_server_runtime(server["id"], None, None)
 
     async def restart(self, server: dict[str, Any]) -> None:
@@ -152,4 +219,50 @@ class ProcessManager:
             handle.seek(max(0, size - max_bytes))
             data = handle.read()
         return size, data.decode("utf-8", errors="replace")
+
+    async def shutdown(self) -> None:
+        """Stop supervising children without stopping the independent game processes."""
+        tasks = list(self._watch_tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._watch_tasks.clear()
+        self._owned_processes.clear()
+
+    async def _watch_process(self, pid: int) -> None:
+        owned = self._owned_processes[pid]
+        try:
+            while owned.process.poll() is None:
+                await asyncio.sleep(self._poll_interval)
+            self._finalize_process(pid)
+        finally:
+            if self._owned_processes.get(pid) is owned:
+                self._owned_processes.pop(pid, None)
+
+    def _finalize_process(self, pid: int) -> None:
+        owned = self._owned_processes.get(pid)
+        if owned is None or owned.finalized or owned.process.returncode is None:
+            return
+        return_code = int(owned.process.returncode)
+        recorded_code = return_code if owned.startup_complete or return_code != 0 else -1
+        try:
+            self.db.record_server_exit(owned.server_id, pid, recorded_code)
+        except Exception as exc:
+            self._append_supervisor_log(
+                owned.log_path, f"Could not persist exit for process {pid}: {exc}"
+            )
+        owned.finalized = True
+        self._append_supervisor_log(
+            owned.log_path, f"Server process {pid} exited with code {return_code}"
+        )
+
+    @staticmethod
+    def _append_supervisor_log(path: Path, message: str) -> None:
+        timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        try:
+            with path.open("ab", buffering=0) as handle:
+                handle.write(f"\n[BLSM {timestamp}] {message}\n".encode())
+        except OSError:
+            pass
 

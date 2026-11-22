@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS servers (
     config TEXT NOT NULL DEFAULT '{}',
     pid INTEGER,
     started_at TEXT,
+    exit_code INTEGER,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -48,6 +49,12 @@ class Database:
     def initialize(self) -> None:
         with self.connect() as connection:
             connection.executescript(SCHEMA)
+            columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(servers)").fetchall()
+            }
+            if "exit_code" not in columns:
+                connection.execute("ALTER TABLE servers ADD COLUMN exit_code INTEGER")
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
@@ -101,12 +108,27 @@ class Database:
         return result
 
     def update_server_runtime(
-        self, server_id: str, pid: int | None, started_at: str | None
+        self,
+        server_id: str,
+        pid: int | None,
+        started_at: str | None,
+        exit_code: int | None = None,
     ) -> None:
         with self.connect() as connection:
             connection.execute(
-                "UPDATE servers SET pid = ?, started_at = ? WHERE id = ?",
-                (pid, started_at, server_id),
+                "UPDATE servers SET pid = ?, started_at = ?, exit_code = ? WHERE id = ?",
+                (pid, started_at, exit_code, server_id),
+            )
+
+    def record_server_exit(self, server_id: str, pid: int, exit_code: int) -> None:
+        """Record an exit only if this PID is still the server's active process."""
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE servers SET pid = NULL, "
+                "exit_code = CASE WHEN ? = 0 THEN NULL ELSE ? END, "
+                "started_at = CASE WHEN ? = 0 THEN NULL ELSE started_at END "
+                "WHERE id = ? AND pid = ?",
+                (exit_code, exit_code, exit_code, server_id, pid),
             )
 
     def update_server_config(self, server_id: str, config: dict[str, Any]) -> None:
