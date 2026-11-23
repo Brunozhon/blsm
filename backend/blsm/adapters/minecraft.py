@@ -13,7 +13,8 @@ from typing import Any
 import httpx
 
 from . import rcon
-from .base import AdapterCapability, ServerAdapter
+from .base import AdapterCapability, ModPackageMetadata, ServerAdapter
+from .fabric_metadata import inspect_fabric_jar
 from .minecraft_game_rules import MINECRAFT_GAME_RULES
 from .minecraft_properties import PROPERTY_METADATA, SECRET_PROPERTIES
 
@@ -86,6 +87,22 @@ class MinecraftFabricAdapter(ServerAdapter):
             "server_port": server_port,
             "memory_mb": max(1024, int(config.get("memory_mb", 4096))),
         }
+
+    def mod_loader(self, config: dict[str, Any]) -> str:
+        del config
+        return "fabric"
+
+    def mod_runtime_versions(self, config: dict[str, Any]) -> dict[str, str]:
+        return {
+            "minecraft": str(config.get("game_version", "")),
+            "fabricloader": str(config.get("loader_version", "")),
+            "java": str(self._installed_java_major()),
+        }
+
+    def inspect_mod_package(
+        self, content: bytes, filename: str
+    ) -> tuple[ModPackageMetadata, ...]:
+        return inspect_fabric_jar(content, filename)
 
     async def available_versions(self) -> list[str]:
         async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
@@ -160,6 +177,19 @@ class MinecraftFabricAdapter(ServerAdapter):
                 f"Minecraft {game_version} requires Java {required} or newer, "
                 "but Java is not installed"
             )
+        installed = self._installed_java_major()
+        if installed < required:
+            raise RuntimeError(
+                f"Minecraft {game_version} requires Java {required} or newer; "
+                f"BLSM found Java {installed}. Rerun the current BLSM installer "
+                "to upgrade the managed Java runtime."
+            )
+
+    @staticmethod
+    def _installed_java_major() -> int:
+        java = shutil.which("java")
+        if java is None:
+            return 0
         try:
             result = subprocess.run(
                 [java, "-XshowSettings:properties", "-version"],
@@ -174,13 +204,7 @@ class MinecraftFabricAdapter(ServerAdapter):
         version_match = re.search(r"java\.specification\.version\s*=\s*(?:1\.)?(\d+)", output)
         if result.returncode != 0 or version_match is None:
             raise RuntimeError(f"Could not determine the Java version at {java}")
-        installed = int(version_match.group(1))
-        if installed < required:
-            raise RuntimeError(
-                f"Minecraft {game_version} requires Java {required} or newer; "
-                f"BLSM found Java {installed}. Rerun the current BLSM installer "
-                "to upgrade the managed Java runtime."
-            )
+        return int(version_match.group(1))
 
     async def send_command(self, path: Path, config: dict[str, Any], command: str) -> str:
         return await rcon.command(

@@ -81,7 +81,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.adapters = adapters
         app.state.sessions = SessionManager(read_or_create_secret(current_settings.data_dir))
         app.state.processes = ProcessManager(db, adapters)
-        app.state.modrinth = ModrinthService(db)
+        app.state.modrinth = ModrinthService(db, adapters)
         app.state.backups = BackupService(
             db,
             app.state.processes,

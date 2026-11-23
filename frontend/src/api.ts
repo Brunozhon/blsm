@@ -1,4 +1,4 @@
-import type { BackupPolicy, BackupRecord, BackupState, GameRules, InstalledMod, ModpackPreview, ModResult, PlayerState, Server, ServerSettings, Stats } from './types'
+import type { BackupPolicy, BackupRecord, BackupState, GameRules, InstalledMod, ModpackPreview, ModPlan, ModResult, ModVersion, PlayerState, Server, ServerSettings, Stats } from './types'
 
 const TOKEN_KEY = 'blsm_session'
 
@@ -116,13 +116,18 @@ export const api = {
   searchMods: (id: string, query: string) =>
     request<ModResult[]>(`/servers/${id}/mods/search?q=${encodeURIComponent(query)}`),
   installedMods: (id: string) => request<InstalledMod[]>(`/servers/${id}/mods`),
-  installMod: (id: string, mod: ModResult) =>
-    request<InstalledMod>(`/servers/${id}/mods`, {
+  modVersions: (id: string, projectId: string) =>
+    request<ModVersion[]>(`/servers/${id}/mods/${projectId}/versions`),
+  planModChange: (id: string, payload: { project_id: string; title?: string; version_id?: string }) =>
+    request<ModPlan>(`/servers/${id}/mods/plan`, {
       method: 'POST',
-      body: JSON.stringify({ project_id: mod.project_id, title: mod.title }),
+      body: JSON.stringify(payload),
     }),
-  updateMod: (id: string, projectId: string) =>
-    request<InstalledMod>(`/servers/${id}/mods/${projectId}/update`, { method: 'POST' }),
+  applyModPlan: (id: string, planId: string) =>
+    request<{ applied: boolean; changes: ModPlan['changes']; mods: InstalledMod[] }>(`/servers/${id}/mods/apply`, {
+      method: 'POST',
+      body: JSON.stringify({ plan_id: planId }),
+    }),
   removeMod: (id: string, projectId: string) =>
     request<{ removed: boolean }>(`/servers/${id}/mods/${projectId}`, { method: 'DELETE' }),
   modpackPreview: (id: string) => request<ModpackPreview>(`/servers/${id}/modpack`),

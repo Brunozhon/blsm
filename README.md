@@ -12,7 +12,7 @@ BLSM (pronounced “Blossom”) is a lightweight, LAN-first game-server control 
 - Live editing for every vanilla Minecraft 26.3 game rule, with typed controls and explanations
 - Searchable Settings tab for every `server.properties` value, with typed controls, concise guidance, masked secrets, and support for future properties
 - Modrinth search filtered to the server's Minecraft and Fabric versions
-- Verified mod install, update, and removal (downloads are checked against Modrinth SHA-512 hashes)
+- Transactional Modrinth installs, upgrades, and downgrades with stable-first dependency resolution, Fabric metadata validation, reviewable plans, and SHA-512 verification
 - Downloadable Modrinth client packs with automatic required-dependency resolution and per-mod selection
 - Manual and scheduled compressed backups with history, downloads, retention cleanup, restoration, and automatic pre-restore safety snapshots
 - Capability-driven React UI and a modular `ServerAdapter` backend boundary
@@ -134,6 +134,14 @@ Scheduling is interval-based rather than cron-based, and requires the BLSM servi
 The **Mods** tab can generate a standard `.mrpack` client pack. BLSM reads the exact Modrinth versions recorded for installed mods, uses each project's client-side compatibility metadata, and recursively resolves required Fabric dependencies for the server's Minecraft version. Client-required and client-optional installed projects are selected initially; server-only projects are excluded. Enabling a project also enables its dependency closure, while disabling a dependency removes projects that require it.
 
 The downloaded archive contains a Modrinth index with HTTPS download references and SHA-1/SHA-512 hashes, not copied server jars, so generation uses negligible extra disk space. Import it into a launcher that supports the Modrinth pack format. Mods installed through BLSM are resolvable; manually copied jars are reported and omitted because BLSM cannot safely infer their project, version, or client compatibility. The current generator covers mods only—it does not yet bundle resource packs, shader packs, or configuration overrides.
+
+### Mod compatibility and version selection
+
+Installing or managing a mod now opens a version resolver instead of immediately downloading the newest file. The default selection prefers the newest compatible stable release, then searches older stable releases before considering beta or alpha builds. Choose an exact version from the dropdown to pin or downgrade a mod. Exact selections do not silently fall back to a different version.
+
+Before presenting an approval plan, BLSM validates the complete server mod set against the server's Minecraft, Fabric Loader, and Java versions. It combines Modrinth's required/incompatible dependency records with each jar's root and declared nested `fabric.mod.json` files, including `depends`, `breaks`, and `conflicts`. Missing dependencies are resolved recursively. Existing mods remain pinned when possible; any necessary install, upgrade, or downgrade is listed with its reason. BLSM never removes a mod as part of resolution.
+
+Resolution may run while Minecraft is online, but **Approve and apply** remains unavailable until the server is stopped. Approved plans expire after ten minutes and are rejected if the installed-mod database or jar directory changed. Application stages verified files on the same filesystem, swaps only BLSM-managed jars, and updates SQLite last. A failure restores the previous jars and database records. Manually copied Fabric jars participate in compatibility checks but cannot be upgraded automatically because they have no trusted Modrinth project/version association.
 
 ### Uninstalling
 

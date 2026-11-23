@@ -26,6 +26,7 @@ from .schemas import (
     GameRulesUpdate,
     ModInstall,
     ModpackBuild,
+    ModPlanApply,
     PasswordPayload,
     PlayerAccess,
     ServerCreate,
@@ -33,6 +34,7 @@ from .schemas import (
     WhitelistSetting,
 )
 from .services.backups import BackupBusy, BackupError
+from .services.mod_resolution import ModResolutionError
 from .services.modrinth import PACK_MIME
 
 router = APIRouter(prefix="/api")
@@ -523,6 +525,60 @@ async def list_mods(request: Request, server_id: str) -> list[dict[str, Any]]:
     return request.app.state.db.list_mods(server_id)
 
 
+@router.get(
+    "/servers/{server_id}/mods/{project_id}/versions",
+    dependencies=[Depends(require_admin)],
+)
+async def mod_versions(
+    request: Request, server_id: str, project_id: str
+) -> list[dict[str, Any]]:
+    server = _server_or_404(request, server_id)
+    try:
+        return await request.app.state.modrinth.versions(server, project_id)
+    except ModResolutionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail="Modrinth is currently unavailable") from exc
+
+
+@router.post("/servers/{server_id}/mods/plan", dependencies=[Depends(require_admin)])
+async def plan_mod_change(
+    request: Request, server_id: str, payload: ModInstall
+) -> dict[str, Any]:
+    server = _server_or_404(request, server_id)
+    _require_no_backup_operation(request, server_id)
+    try:
+        return await request.app.state.modrinth.plan(
+            server, payload.project_id, payload.title, payload.version_id
+        )
+    except ModResolutionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail="Modrinth is currently unavailable") from exc
+
+
+@router.post("/servers/{server_id}/mods/apply", dependencies=[Depends(require_admin)])
+async def apply_mod_change(
+    request: Request, server_id: str, payload: ModPlanApply
+) -> dict[str, Any]:
+    _server_or_404(request, server_id)
+    _require_no_backup_operation(request, server_id)
+    processes = request.app.state.processes
+    processes.block_server_operations(server_id)
+    try:
+        refreshed = _server_or_404(request, server_id)
+        if processes.status(refreshed) == "running":
+            raise HTTPException(
+                status_code=409,
+                detail="Stop the game server before applying mod changes",
+            )
+        return await request.app.state.modrinth.apply_plan(refreshed, payload.plan_id)
+    except ModResolutionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    finally:
+        processes.unblock_server_operations(server_id)
+
+
 @router.get("/servers/{server_id}/modpack", dependencies=[Depends(require_admin)])
 async def modpack_preview(request: Request, server_id: str) -> dict[str, Any]:
     server = _server_or_404(request, server_id)
@@ -576,9 +632,13 @@ async def install_mod(
     server = _server_or_404(request, server_id)
     _require_no_backup_operation(request, server_id)
     try:
-        return await request.app.state.modrinth.install(server, payload.project_id, payload.title)
-    except (RuntimeError, httpx.HTTPError) as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return await request.app.state.modrinth.plan(
+            server, payload.project_id, payload.title, payload.version_id
+        )
+    except ModResolutionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail="Modrinth is currently unavailable") from exc
 
 
 @router.delete("/servers/{server_id}/mods/{project_id}", dependencies=[Depends(require_admin)])
@@ -609,9 +669,13 @@ async def update_mod(request: Request, server_id: str, project_id: str) -> dict[
     if installed is None:
         raise HTTPException(status_code=404, detail="This mod is not installed")
     try:
-        return await request.app.state.modrinth.install(server, project_id, installed["title"])
-    except (RuntimeError, httpx.HTTPError) as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return await request.app.state.modrinth.plan(
+            server, project_id, installed["title"], None
+        )
+    except ModResolutionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail="Modrinth is currently unavailable") from exc
 
 
 async def console_socket(websocket: WebSocket, server_id: str) -> None:

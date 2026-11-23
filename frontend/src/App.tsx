@@ -36,7 +36,7 @@ import {
 } from 'lucide-react'
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api, session } from './api'
-import type { BackupPolicy, BackupRecord, BackupState, GameRule, InstalledMod, ModpackMod, ModpackPreview, ModResult, PlayerState, Server, ServerSetting, Stats } from './types'
+import type { BackupPolicy, BackupRecord, BackupState, GameRule, InstalledMod, ModpackMod, ModpackPreview, ModPlan, ModResult, ModVersion, PlayerState, Server, ServerSetting, Stats } from './types'
 
 type View = 'overview' | 'console' | 'mods' | 'players' | 'backups' | 'game-rules' | 'settings'
 
@@ -1071,6 +1071,12 @@ function ModsView({ server, setError }: { server: Server; setError: (error: stri
   const [packName, setPackName] = useState(`${server.name} Client`)
   const [packVersion, setPackVersion] = useState('1.0.0')
   const [selectedPackMods, setSelectedPackMods] = useState<Set<string>>(new Set())
+  const [modTarget, setModTarget] = useState<{ project_id: string; title: string } | null>(null)
+  const [versions, setVersions] = useState<ModVersion[]>([])
+  const [selectedVersion, setSelectedVersion] = useState('')
+  const [modPlan, setModPlan] = useState<ModPlan | null>(null)
+  const [resolverBusy, setResolverBusy] = useState(false)
+  const [resolverError, setResolverError] = useState('')
   const supportsModpacks = server.capabilities.includes('modpacks')
 
   const loadInstalled = useCallback(() => api.installedMods(server.id).then(setInstalled).catch((reason) => setError(String(reason))), [server.id, setError])
@@ -1098,23 +1104,54 @@ function ModsView({ server, setError }: { server: Server; setError: (error: stri
     catch (reason) { setError(reason instanceof Error ? reason.message : 'Search failed') }
     finally { setLoading(false) }
   }
-  async function install(mod: ModResult) {
-    setWorking(mod.project_id)
-    try { await api.installMod(server.id, mod); await Promise.all([loadInstalled(), loadModpack()]) }
-    catch (reason) { setError(reason instanceof Error ? reason.message : 'Install failed') }
-    finally { setWorking('') }
-  }
   async function remove(projectId: string) {
     setWorking(projectId)
     try { await api.removeMod(server.id, projectId); await Promise.all([loadInstalled(), loadModpack()]) }
     catch (reason) { setError(reason instanceof Error ? reason.message : 'Remove failed') }
     finally { setWorking('') }
   }
-  async function update(projectId: string) {
-    setWorking(projectId)
-    try { await api.updateMod(server.id, projectId); await Promise.all([loadInstalled(), loadModpack()]) }
-    catch (reason) { setError(reason instanceof Error ? reason.message : 'Update failed') }
-    finally { setWorking('') }
+  async function openVersionManager(target: { project_id: string; title: string }) {
+    setModTarget(target)
+    setVersions([])
+    setSelectedVersion('')
+    setModPlan(null)
+    setResolverError('')
+    setResolverBusy(true)
+    try { setVersions(await api.modVersions(server.id, target.project_id)) }
+    catch (reason) { setResolverError(reason instanceof Error ? reason.message : 'Could not load versions') }
+    finally { setResolverBusy(false) }
+  }
+  async function resolveModChange() {
+    if (!modTarget) return
+    setResolverBusy(true)
+    setResolverError('')
+    setModPlan(null)
+    try {
+      setModPlan(await api.planModChange(server.id, {
+        project_id: modTarget.project_id,
+        title: modTarget.title,
+        ...(selectedVersion ? { version_id: selectedVersion } : {}),
+      }))
+    } catch (reason) {
+      setResolverError(reason instanceof Error ? reason.message : 'No compatible version set was found')
+    } finally {
+      setResolverBusy(false)
+    }
+  }
+  async function applyModChange() {
+    if (!modPlan) return
+    setResolverBusy(true)
+    setResolverError('')
+    try {
+      await api.applyModPlan(server.id, modPlan.plan_id)
+      await Promise.all([loadInstalled(), loadModpack()])
+      setModTarget(null)
+      setModPlan(null)
+    } catch (reason) {
+      setResolverError(reason instanceof Error ? reason.message : 'Could not apply mod changes')
+    } finally {
+      setResolverBusy(false)
+    }
   }
   const installedIds = useMemo(() => new Set(installed.map((mod) => mod.project_id)), [installed])
   const packModsById = useMemo(() => new Map(pack?.mods.map((mod) => [mod.project_id, mod]) ?? []), [pack])
@@ -1209,7 +1246,7 @@ function ModsView({ server, setError }: { server: Server; setError: (error: stri
         <section>
           <div className="mb-3 flex items-center gap-2"><PackageCheck size={16} className="text-zinc-500" /><h3 className="text-sm font-medium">Installed</h3><span className="text-xs text-zinc-600">{installed.length}</span></div>
           <div className="panel divide-y divide-zinc-800/70">
-            {installed.map((mod) => <div key={mod.project_id} className="flex items-center gap-4 p-4"><div className="grid size-10 place-items-center rounded-lg border border-zinc-800 bg-zinc-900 text-zinc-500"><Box size={17} /></div><div className="min-w-0 flex-1"><p className="truncate text-sm font-medium text-zinc-200">{mod.title}</p><p className="mt-1 truncate font-mono text-xs text-zinc-600">{mod.filename}</p></div><button disabled={working === mod.project_id} onClick={() => void update(mod.project_id)} className="icon-btn" aria-label={`Check ${mod.title} for updates`}><RefreshCw size={15} className={working === mod.project_id ? 'animate-spin' : ''} /></button><button disabled={working === mod.project_id} onClick={() => void remove(mod.project_id)} className="icon-btn text-zinc-500 hover:text-red-300" aria-label={`Remove ${mod.title}`}><Trash2 size={15} /></button></div>)}
+            {installed.map((mod) => <div key={mod.project_id} className="flex items-center gap-4 p-4"><div className="grid size-10 place-items-center rounded-lg border border-zinc-800 bg-zinc-900 text-zinc-500"><Box size={17} /></div><div className="min-w-0 flex-1"><p className="truncate text-sm font-medium text-zinc-200">{mod.title}</p><p className="mt-1 truncate font-mono text-xs text-zinc-600">{mod.filename}</p></div><button disabled={working === mod.project_id} onClick={() => void openVersionManager(mod)} className="btn-secondary shrink-0"><RefreshCw size={14} /> Manage version</button><button disabled={working === mod.project_id} onClick={() => void remove(mod.project_id)} className="icon-btn text-zinc-500 hover:text-red-300" aria-label={`Remove ${mod.title}`}><Trash2 size={15} /></button></div>)}
           </div>
         </section>
       )}
@@ -1218,11 +1255,31 @@ function ModsView({ server, setError }: { server: Server; setError: (error: stri
         <div className="grid gap-3 xl:grid-cols-2">
           {results.map((mod) => {
             const isInstalled = installedIds.has(mod.project_id)
-            return <article key={mod.project_id} className="panel flex gap-4 p-4"><div className="grid size-12 shrink-0 place-items-center overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900 text-zinc-600">{mod.icon_url ? <img src={mod.icon_url} alt="" className="size-full object-cover" /> : <Box size={19} />}</div><div className="min-w-0 flex-1"><div className="flex items-start justify-between gap-3"><div><h4 className="text-sm font-medium text-zinc-200">{mod.title}</h4><p className="mt-0.5 text-xs text-zinc-600">by {mod.author} · {formatDownloads(mod.downloads)} downloads</p></div><button disabled={working === mod.project_id || isInstalled} onClick={() => void install(mod)} className={isInstalled ? 'btn-secondary shrink-0 opacity-60' : 'btn-primary shrink-0'}>{working === mod.project_id ? <RefreshCw size={14} className="animate-spin" /> : isInstalled ? <PackageCheck size={14} /> : <Download size={14} />}{isInstalled ? 'Installed' : 'Install'}</button></div><p className="mt-3 line-clamp-2 text-sm leading-5 text-zinc-500">{mod.description}</p></div></article>
+            return <article key={mod.project_id} className="panel flex gap-4 p-4"><div className="grid size-12 shrink-0 place-items-center overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900 text-zinc-600">{mod.icon_url ? <img src={mod.icon_url} alt="" className="size-full object-cover" /> : <Box size={19} />}</div><div className="min-w-0 flex-1"><div className="flex items-start justify-between gap-3"><div><h4 className="text-sm font-medium text-zinc-200">{mod.title}</h4><p className="mt-0.5 text-xs text-zinc-600">by {mod.author} · {formatDownloads(mod.downloads)} downloads</p></div><button disabled={isInstalled} onClick={() => void openVersionManager(mod)} className={isInstalled ? 'btn-secondary shrink-0 opacity-60' : 'btn-primary shrink-0'}>{isInstalled ? <PackageCheck size={14} /> : <Download size={14} />}{isInstalled ? 'Installed' : 'Install'}</button></div><p className="mt-3 line-clamp-2 text-sm leading-5 text-zinc-500">{mod.description}</p></div></article>
           })}
         </div>
         {!loading && results.length === 0 && <div className="grid min-h-64 place-items-center rounded-xl border border-dashed border-zinc-800 text-center"><div><Boxes className="mx-auto text-zinc-700" size={23} /><p className="mt-3 text-sm text-zinc-500">Search more than 50,000 projects on Modrinth</p><p className="mt-1 text-xs text-zinc-700">Only compatible Fabric versions are shown.</p></div></div>}
       </section>
+      {modTarget && (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-black/75 p-4 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="mod-version-title">
+          <div className="panel max-h-[90vh] w-full max-w-2xl overflow-y-auto shadow-2xl shadow-black/50">
+            <div className="panel-header"><div><h3 id="mod-version-title" className="panel-title">{modTarget.title}</h3><p className="panel-description">Resolve a compatible Fabric version and review every dependency change.</p></div><button className="icon-btn" onClick={() => setModTarget(null)} aria-label="Close version manager"><X size={17} /></button></div>
+            <div className="space-y-5 p-5">
+              <label className="field-label">Version<select className="input mt-2" value={selectedVersion} disabled={resolverBusy} onChange={(event) => { setSelectedVersion(event.target.value); setModPlan(null); setResolverError('') }}><option value="">Recommended compatible version — stable preferred</option>{versions.map((version) => <option key={version.id} value={version.id}>{version.version_number} · {version.version_type}{installed.find((item) => item.project_id === modTarget.project_id)?.version_id === version.id ? ' · installed' : ''}</option>)}</select><span className="mt-2 block text-xs leading-5 text-zinc-600">BLSM searches older releases when newer versions conflict. Choosing an exact version disables that fallback.</span></label>
+              {!modPlan && <button className="btn-primary" disabled={resolverBusy || versions.length === 0} onClick={() => void resolveModChange()}>{resolverBusy ? <RefreshCw size={14} className="animate-spin" /> : <ShieldCheck size={14} />} Check compatibility</button>}
+              {resolverError && <div className="rounded-lg border border-red-500/20 bg-red-500/[0.045] px-4 py-3 text-sm leading-6 text-red-200/85">{resolverError}</div>}
+              {modPlan && (
+                <div className="space-y-4">
+                  <div className="rounded-lg border border-blue-500/20 bg-blue-500/[0.045] px-4 py-3"><p className="text-sm font-medium text-blue-200">Resolved {modPlan.selected_version}</p><p className="mt-1 text-xs leading-5 text-blue-200/60">The complete installed set passed Modrinth and Fabric metadata checks.</p></div>
+                  {modPlan.changes.length === 0 ? <p className="rounded-lg border border-zinc-800 bg-zinc-900/40 px-4 py-3 text-sm text-zinc-400">This version is already installed and compatible. No files need to change.</p> : <div className="divide-y divide-zinc-800/70 rounded-lg border border-zinc-800">{modPlan.changes.map((change) => <div key={change.project_id} className="flex items-start gap-3 p-4"><span className={`mt-0.5 rounded-md px-2 py-1 text-[10px] font-semibold uppercase tracking-wide ${change.direction === 'downgrade' ? 'bg-amber-500/10 text-amber-300' : change.direction === 'install' ? 'bg-blue-500/10 text-blue-300' : 'bg-emerald-500/10 text-emerald-300'}`}>{change.direction}</span><div className="min-w-0 flex-1"><p className="text-sm font-medium text-zinc-200">{change.title}</p><p className="mt-1 text-xs text-zinc-500">{change.from_version ? `${change.from_version} → ` : ''}{change.to_version} · {change.version_type}</p><p className="mt-1 text-xs leading-5 text-zinc-600">{change.reason}</p></div></div>)}</div>}
+                  {server.status === 'running' && modPlan.changes.length > 0 && <div className="rounded-lg border border-amber-500/20 bg-amber-500/[0.045] px-4 py-3 text-sm text-amber-200/80">Stop the game server before applying this plan. The plan can be resolved while it is online, but server files are changed only while offline.</div>}
+                  <div className="flex justify-end gap-2"><button className="btn-secondary" onClick={() => { setModPlan(null); setResolverError('') }}>Change selection</button>{modPlan.changes.length > 0 && <button className="btn-primary" disabled={resolverBusy || server.status === 'running'} onClick={() => void applyModChange()}>{resolverBusy ? <RefreshCw size={14} className="animate-spin" /> : <Save size={14} />} Approve and apply {modPlan.changes.length} change{modPlan.changes.length === 1 ? '' : 's'}</button>}</div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

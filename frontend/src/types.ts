@@ -116,6 +116,40 @@ export interface InstalledMod {
   installed_at: string
 }
 
+export interface ModVersion {
+  id: string
+  name: string
+  version_number: string
+  version_type: 'release' | 'beta' | 'alpha'
+  date_published?: string | null
+  project_title: string
+  recommended: boolean
+}
+
+export interface ModChange {
+  project_id: string
+  title: string
+  action: 'install' | 'change'
+  direction: 'install' | 'update' | 'downgrade'
+  from_version_id?: string | null
+  from_version?: string | null
+  to_version_id: string
+  to_version: string
+  version_type: string
+  reason: string
+}
+
+export interface ModPlan {
+  plan_id: string
+  project_id: string
+  project_title: string
+  selected_version_id: string
+  selected_version: string
+  changes: ModChange[]
+  requires_confirmation: boolean
+  server_must_be_stopped: boolean
+}
+
 export type ModrinthEnvironment = 'required' | 'optional' | 'unsupported' | 'unknown'
 
 export interface ModpackMod {

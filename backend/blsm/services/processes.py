@@ -43,7 +43,7 @@ class ProcessManager:
         self._cpu_samples: dict[int, tuple[int, float]] = {}
         self._owned_processes: dict[int, OwnedProcess] = {}
         self._watch_tasks: set[asyncio.Task[None]] = set()
-        self._blocked_servers: set[str] = set()
+        self._blocked_servers: dict[str, int] = {}
         self._poll_interval = poll_interval
         self._startup_grace = startup_grace
 
@@ -74,10 +74,14 @@ class ProcessManager:
         return "stopped" if adapter.is_installed(path) else "not_installed"
 
     def block_server_operations(self, server_id: str) -> None:
-        self._blocked_servers.add(server_id)
+        self._blocked_servers[server_id] = self._blocked_servers.get(server_id, 0) + 1
 
     def unblock_server_operations(self, server_id: str) -> None:
-        self._blocked_servers.discard(server_id)
+        remaining = self._blocked_servers.get(server_id, 0) - 1
+        if remaining > 0:
+            self._blocked_servers[server_id] = remaining
+        else:
+            self._blocked_servers.pop(server_id, None)
 
     def _require_unblocked(self, server_id: str, allow_blocked: bool) -> None:
         if not allow_blocked and server_id in self._blocked_servers:

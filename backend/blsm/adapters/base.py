@@ -27,6 +27,16 @@ class InstallProgress:
     percent: int
 
 
+@dataclass(frozen=True, slots=True)
+class ModPackageMetadata:
+    package_id: str
+    version: str
+    name: str
+    depends: dict[str, str | list[str]]
+    breaks: dict[str, str | list[str]]
+    conflicts: dict[str, str | list[str]]
+
+
 class ServerAdapter(ABC):
     key: str
     display_name: str
@@ -51,6 +61,20 @@ class ServerAdapter(ABC):
     @abstractmethod
     def is_installed(self, path: Path) -> bool:
         """Whether enough server files exist to launch."""
+
+    def mod_loader(self, config: dict[str, Any]) -> str:
+        """Return the repository loader key for this adapter's packages."""
+        raise NotImplementedError("This server adapter does not manage mods")
+
+    def mod_runtime_versions(self, config: dict[str, Any]) -> dict[str, str]:
+        """Return adapter-native runtime package versions used by dependency checks."""
+        raise NotImplementedError("This server adapter does not manage mods")
+
+    def inspect_mod_package(
+        self, content: bytes, filename: str
+    ) -> tuple[ModPackageMetadata, ...]:
+        """Return normalized package-native dependency metadata."""
+        raise NotImplementedError("This server adapter does not manage mods")
 
     def validate_environment(self, path: Path, config: dict[str, Any]) -> None:
         """Raise a useful error when host runtime requirements are not met."""

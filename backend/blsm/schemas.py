@@ -78,8 +78,15 @@ class BackupPolicyUpdate(BaseModel):
 
 
 class ModInstall(BaseModel):
-    project_id: str = Field(min_length=1, max_length=128)
+    project_id: str = Field(min_length=1, max_length=128, pattern=r"^[0-9A-Za-z_-]+$")
     title: str | None = Field(default=None, max_length=256)
+    version_id: str | None = Field(
+        default=None, min_length=1, max_length=128, pattern=r"^[0-9A-Za-z_-]+$"
+    )
+
+
+class ModPlanApply(BaseModel):
+    plan_id: str = Field(min_length=16, max_length=128, pattern=r"^[0-9A-Za-z_-]+$")
 
 
 class ModpackBuild(BaseModel):
