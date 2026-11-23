@@ -95,6 +95,80 @@ def test_rejects_java_runtime_that_is_too_old(monkeypatch: Any) -> None:
         )
 
 
+async def test_configuration_transaction_updates_seed_memory_and_rolls_back_upgrade(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    adapter = MinecraftFabricAdapter()
+    properties = tmp_path / "server.properties"
+    properties.write_text("level-name=world\nlevel-seed=old-seed\n", encoding="utf-8")
+    launcher = tmp_path / "fabric-server-launch.jar"
+    launcher.write_bytes(b"old-launcher")
+
+    async def versions() -> list[str]:
+        return ["26.3", "1.21.11"]
+
+    async def download(
+        game_version: str,
+        loader_version: str | None = None,
+        installer_version: str | None = None,
+    ) -> tuple[bytes, str, str]:
+        assert game_version == "26.3"
+        assert loader_version is None
+        assert installer_version is None
+        return b"new-launcher", "0.19.4", "1.1.0"
+
+    monkeypatch.setattr(adapter, "available_versions", versions)
+    monkeypatch.setattr(adapter, "_download_launcher", download)
+    monkeypatch.setattr(adapter, "validate_environment", lambda *_: None)
+    config = {
+        "game_version": "1.21.11",
+        "memory_mb": 2048,
+        "loader_version": "0.18.2",
+        "installer_version": "1.0.3",
+    }
+
+    with pytest.raises(RuntimeError, match="database failed"):
+        async with adapter.configuration_transaction(
+            tmp_path,
+            config,
+            {"memory_mb": 4096, "world_seed": "new-seed", "game_version": "26.3"},
+        ) as updated:
+            assert updated["memory_mb"] == 4096
+            assert updated["game_version"] == "26.3"
+            assert updated["loader_version"] == "0.19.4"
+            assert launcher.read_bytes() == b"new-launcher"
+            assert "level-seed=new-seed" in properties.read_text(encoding="utf-8")
+            raise RuntimeError("database failed")
+
+    assert launcher.read_bytes() == b"old-launcher"
+    assert properties.read_text(encoding="utf-8") == (
+        "level-name=world\nlevel-seed=old-seed\n"
+    )
+
+    async with adapter.configuration_transaction(
+        tmp_path, config, {"memory_mb": 4096, "world_seed": "new-seed"}
+    ) as updated:
+        assert updated["memory_mb"] == 4096
+    assert "level-seed=new-seed" in properties.read_text(encoding="utf-8")
+
+
+async def test_configuration_rejects_seed_change_after_world_generation(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "server.properties").write_text(
+        "level-name=world\nlevel-seed=original\n", encoding="utf-8"
+    )
+    world = tmp_path / "world"
+    world.mkdir()
+    (world / "level.dat").write_bytes(b"world metadata")
+
+    with pytest.raises(ValueError, match="already been generated"):
+        async with MinecraftFabricAdapter().configuration_transaction(
+            tmp_path, {"world_seed": "original"}, {"world_seed": "different"}
+        ):
+            pass
+
+
 def test_reads_and_updates_all_server_properties_without_exposing_secrets(
     tmp_path: Path,
 ) -> None:

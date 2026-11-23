@@ -166,6 +166,19 @@ class Database:
                 "UPDATE servers SET config = ? WHERE id = ?", (json.dumps(config), server_id)
             )
 
+    def update_server_details(
+        self, server_id: str, name: str, config: dict[str, Any]
+    ) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE servers SET name = ?, config = ? WHERE id = ?",
+                (name, json.dumps(config), server_id),
+            )
+
+    def delete_server(self, server_id: str) -> None:
+        with self.connect() as connection:
+            connection.execute("DELETE FROM servers WHERE id = ?", (server_id,))
+
     def list_mods(self, server_id: str) -> list[dict[str, Any]]:
         with self.connect() as connection:
             rows = connection.execute(

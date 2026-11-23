@@ -63,6 +63,13 @@ export const api = {
   servers: () => request<Server[]>('/servers'),
   createServer: (payload: Record<string, unknown>) =>
     request<Server>('/servers', { method: 'POST', body: JSON.stringify(payload) }),
+  updateServer: (id: string, payload: { name: string; config: Record<string, string | number> }) =>
+    request<Server>(`/servers/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
+  deleteServer: (id: string, confirmation: string) =>
+    request<{ deleted: boolean }>(`/servers/${id}`, {
+      method: 'DELETE',
+      body: JSON.stringify({ confirmation }),
+    }),
   action: (id: string, action: 'install' | 'start' | 'stop' | 'restart') =>
     request<Server>(`/servers/${id}/${action}`, { method: 'POST' }),
   stats: (id: string) => request<Stats>(`/servers/${id}/stats`),

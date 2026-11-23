@@ -17,6 +17,41 @@ class ServerCreate(BaseModel):
     server_port: int = Field(default=25565, ge=1024, le=65535)
     rcon_port: int = Field(default=25575, ge=1024, le=65535)
     accept_eula: bool = False
+    world_seed: str = Field(default="", max_length=128)
+
+    @field_validator("world_seed")
+    @classmethod
+    def validate_world_seed(cls, value: str) -> str:
+        if any(character in value for character in "\r\n\x00"):
+            raise ValueError("World seed cannot contain line breaks")
+        return value.strip()
+
+
+class ServerUpdate(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
+    config: dict[str, str | StrictInt] = Field(default_factory=dict)
+
+    @field_validator("config")
+    @classmethod
+    def validate_config(
+        cls, values: dict[str, str | int]
+    ) -> dict[str, str | int]:
+        if len(values) > 32:
+            raise ValueError("Too many configuration values")
+        for key, value in values.items():
+            if not 1 <= len(key) <= 64 or not all(
+                character.isalnum() or character in "_-" for character in key
+            ):
+                raise ValueError(f"Invalid configuration name: {key}")
+            if isinstance(value, str) and (
+                len(value) > 256 or any(character in value for character in "\r\n\x00")
+            ):
+                raise ValueError(f"Invalid configuration value: {key}")
+        return values
+
+
+class ServerDelete(BaseModel):
+    confirmation: str = Field(min_length=1, max_length=64)
 
 
 class ConsoleCommand(BaseModel):

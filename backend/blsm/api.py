@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import shutil
 import uuid
 from pathlib import Path
 from typing import Any, NoReturn
@@ -30,7 +31,9 @@ from .schemas import (
     PasswordPayload,
     PlayerAccess,
     ServerCreate,
+    ServerDelete,
     ServerSettingsUpdate,
+    ServerUpdate,
     WhitelistSetting,
 )
 from .services.backups import BackupBusy, BackupError
@@ -67,7 +70,8 @@ def _require_no_backup_operation(request: Request, server_id: str) -> None:
 
 def _public_server(request: Request, server: dict[str, Any]) -> dict[str, Any]:
     adapter = request.app.state.adapters[server["adapter"]]
-    config = {key: value for key, value in server["config"].items() if key != "rcon_password"}
+    adapter_config = adapter.public_config(Path(server["path"]), server["config"])
+    config = {key: value for key, value in adapter_config.items() if key != "rcon_password"}
     return {
         "id": server["id"],
         "name": server["name"],
@@ -163,6 +167,75 @@ async def create_server(request: Request, payload: ServerCreate) -> dict[str, An
 @router.get("/servers/{server_id}", dependencies=[Depends(require_admin)])
 async def get_server(request: Request, server_id: str) -> dict[str, Any]:
     return _public_server(request, _server_or_404(request, server_id))
+
+
+@router.patch("/servers/{server_id}", dependencies=[Depends(require_admin)])
+async def update_server(
+    request: Request, server_id: str, payload: ServerUpdate
+) -> dict[str, Any]:
+    server = _server_or_404(request, server_id)
+    _require_no_backup_operation(request, server_id)
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Server name cannot be blank")
+    adapter = request.app.state.adapters[server["adapter"]]
+    if payload.config and AdapterCapability.MANAGEMENT not in adapter.capabilities:
+        raise HTTPException(
+            status_code=404,
+            detail="This server does not expose management settings",
+        )
+    if payload.config and request.app.state.processes.status(server) == "running":
+        raise HTTPException(status_code=409, detail="Stop the server before changing it")
+    request.app.state.processes.block_server_operations(server_id)
+    try:
+        if payload.config:
+            async with adapter.configuration_transaction(
+                Path(server["path"]), server["config"], payload.config
+            ) as config:
+                request.app.state.db.update_server_details(server_id, name, config)
+        else:
+            request.app.state.db.update_server_details(
+                server_id, name, server["config"]
+            )
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        request.app.state.processes.unblock_server_operations(server_id)
+    return _public_server(request, _server_or_404(request, server_id))
+
+
+@router.delete("/servers/{server_id}", dependencies=[Depends(require_admin)])
+async def delete_server(
+    request: Request, server_id: str, payload: ServerDelete
+) -> dict[str, bool]:
+    server = _server_or_404(request, server_id)
+    _require_no_backup_operation(request, server_id)
+    if payload.confirmation != server["name"]:
+        raise HTTPException(status_code=400, detail="Type the exact server name to confirm")
+    if request.app.state.processes.status(server) == "running":
+        raise HTTPException(status_code=409, detail="Stop the server before deleting it")
+    servers_dir = request.app.state.settings.servers_dir.resolve()
+    server_path = Path(server["path"])
+    if server_path.is_symlink() or server_path.resolve().parent != servers_dir:
+        raise HTTPException(status_code=409, detail="Refusing to delete an unsafe server path")
+
+    request.app.state.processes.block_server_operations(server_id)
+    try:
+        await request.app.state.backups.purge_server(server_id)
+        if server_path.exists():
+            shutil.rmtree(server_path)
+        request.app.state.db.delete_server(server_id)
+    except BackupError as exc:
+        _raise_backup_error(exc)
+    except OSError as exc:
+        raise HTTPException(
+            status_code=500, detail=f"Could not completely delete the server: {exc}"
+        ) from exc
+    finally:
+        request.app.state.processes.unblock_server_operations(server_id)
+    return {"deleted": True}
 
 
 @router.post("/servers/{server_id}/install", dependencies=[Depends(require_admin)])

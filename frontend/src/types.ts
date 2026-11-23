@@ -11,6 +11,8 @@ export interface Server {
     game_version?: string
     memory_mb?: number
     server_port?: number
+    world_seed?: string
+    world_seed_locked?: boolean
   }
 }
 

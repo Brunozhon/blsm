@@ -180,6 +180,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [view, setView] = useState<View>('overview')
   const [createOpen, setCreateOpen] = useState(false)
+  const [manageOpen, setManageOpen] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState('')
@@ -297,7 +298,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
               ) : (
                 <button className="btn-primary" disabled={Boolean(busy)} onClick={() => void action('start')}><Play size={14} fill="currentColor" /> {busy === 'start' ? 'Starting…' : 'Start'}</button>
               )}
-              <button className="icon-btn" aria-label="More actions"><MoreHorizontal size={18} /></button>
+              <button className="icon-btn" onClick={() => setManageOpen(true)} aria-label="Manage server"><MoreHorizontal size={18} /></button>
             </div>
           )}
         </header>
@@ -322,6 +323,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
         </div>
       </main>
       {createOpen && <CreateServerModal onClose={() => setCreateOpen(false)} onCreated={(server) => { setServers((current) => [...current, server]); setSelectedId(server.id); setCreateOpen(false) }} />}
+      {manageOpen && selected && <ManageServerModal server={selected} onClose={() => setManageOpen(false)} onUpdated={(server) => setServers((current) => current.map((item) => item.id === server.id ? server : item))} onDeleted={() => { const remaining = servers.filter((item) => item.id !== selected.id); setServers(remaining); setSelectedId(remaining[0]?.id ?? null); setView('overview'); setManageOpen(false) }} />}
     </div>
   )
 }
@@ -1284,6 +1286,101 @@ function ModsView({ server, setError }: { server: Server; setError: (error: stri
   )
 }
 
+function ManageServerModal({ server, onClose, onUpdated, onDeleted }: { server: Server; onClose: () => void; onUpdated: (server: Server) => void; onDeleted: () => void }) {
+  const configurable = server.capabilities.includes('management')
+  const [name, setName] = useState(server.name)
+  const [memory, setMemory] = useState(server.config.memory_mb ?? 4096)
+  const [seed, setSeed] = useState(server.config.world_seed ?? '')
+  const [version, setVersion] = useState(server.config.game_version ?? '')
+  const [versions, setVersions] = useState<string[]>([server.config.game_version ?? ''].filter(Boolean))
+  const [versionsLoading, setVersionsLoading] = useState(configurable)
+  const [confirmation, setConfirmation] = useState('')
+  const [busy, setBusy] = useState<'save' | 'delete' | ''>('')
+  const [error, setError] = useState('')
+  const currentVersion = server.config.game_version ?? ''
+  const stopped = server.status !== 'running'
+  const configurationChanged = configurable && (memory !== (server.config.memory_mb ?? 4096) || seed !== (server.config.world_seed ?? '') || version !== currentVersion)
+
+  useEffect(() => {
+    if (!configurable) return
+    let cancelled = false
+    void api.adapterVersions(server.adapter).then((available) => {
+      if (!cancelled && available.length > 0) setVersions(available)
+    }).catch((reason) => {
+      if (!cancelled) setError(reason instanceof Error ? reason.message : 'Could not load versions')
+    }).finally(() => {
+      if (!cancelled) setVersionsLoading(false)
+    })
+    return () => { cancelled = true }
+  }, [configurable, server.adapter])
+
+  const upgradeOptions = useMemo(() => {
+    const currentIndex = versions.indexOf(currentVersion)
+    const newer = currentIndex >= 0 ? versions.slice(0, currentIndex) : versions.filter((item) => item !== currentVersion)
+    return [currentVersion, ...newer].filter((item, index, values) => item && values.indexOf(item) === index)
+  }, [currentVersion, versions])
+
+  async function save(event: FormEvent) {
+    event.preventDefault()
+    setBusy('save')
+    setError('')
+    try {
+      const config: Record<string, string | number> = {}
+      if (memory !== (server.config.memory_mb ?? 4096)) config.memory_mb = memory
+      if (seed !== (server.config.world_seed ?? '')) config.world_seed = seed
+      if (version !== currentVersion) config.game_version = version
+      const updated = await api.updateServer(server.id, {
+        name,
+        config,
+      })
+      onUpdated(updated)
+      onClose()
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Could not update server')
+    } finally {
+      setBusy('')
+    }
+  }
+
+  async function remove() {
+    setBusy('delete')
+    setError('')
+    try {
+      await api.deleteServer(server.id, confirmation)
+      onDeleted()
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Could not delete server')
+      setBusy('')
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center overflow-y-auto bg-black/75 p-4 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="manage-title">
+      <div className="panel my-6 w-full max-w-2xl shadow-2xl shadow-black/50">
+        <div className="panel-header"><div><h2 id="manage-title" className="text-base font-semibold">Manage server</h2><p className="panel-description">Identity, runtime allocation, version, and deletion.</p></div><button type="button" className="icon-btn" onClick={onClose}><X size={17} /></button></div>
+        <form onSubmit={save} className="space-y-5 p-5">
+          {!stopped && configurationChanged && <div className="rounded-lg border border-amber-500/20 bg-amber-500/[0.045] px-4 py-3 text-sm text-amber-200/80">Stop the server before changing its configuration. Renaming remains available while it is online.</div>}
+          <label className="field-label">Server name<input required maxLength={64} className="input mt-2" value={name} onChange={(event) => setName(event.target.value)} /></label>
+          {configurable && <><div className="grid gap-4 sm:grid-cols-2">
+              <label className="field-label">RAM allocation<input required className="input mt-2" type="number" min={1024} max={14336} step={256} value={memory} onChange={(event) => setMemory(Number(event.target.value))} /><span className="mt-2 block text-xs leading-5 text-zinc-600">1,024–14,336 MB. Applied on the next start.</span></label>
+              <label className="field-label">Minecraft version<select required className="input mt-2" value={version} disabled={versionsLoading} onChange={(event) => setVersion(event.target.value)}>{upgradeOptions.map((item) => <option key={item} value={item}>{item}{item === currentVersion ? ' · installed' : ' · upgrade'}</option>)}</select><span className="mt-2 block text-xs leading-5 text-zinc-600">Only newer stable Fabric releases are offered.</span></label>
+            </div>
+            <label className="field-label">World seed<input className="input mt-2 font-mono" maxLength={128} disabled={server.config.world_seed_locked} value={seed} onChange={(event) => setSeed(event.target.value)} placeholder="Random seed" /><span className="mt-2 block text-xs leading-5 text-zinc-600">{server.config.world_seed_locked ? 'Locked because this world has already been generated. Its stored seed cannot be replaced safely.' : 'Leave blank for a random seed. Set this before the world is generated.'}</span></label>
+            {version !== currentVersion && <div className="rounded-lg border border-blue-500/20 bg-blue-500/[0.045] px-4 py-3 text-sm leading-6 text-blue-200/75">Upgrading replaces only the Fabric launcher and preserves the world, mods, properties, and backups. Make a backup first and review mod compatibility before starting the upgraded server.</div>}
+          </>}
+          {error && <p className="rounded-lg border border-red-500/20 bg-red-500/[0.045] px-4 py-3 text-sm text-red-300">{error}</p>}
+          <div className="flex justify-end gap-2"><button type="button" className="btn-secondary" onClick={onClose}>Cancel</button><button className="btn-primary" disabled={(configurationChanged && !stopped) || Boolean(busy) || versionsLoading}>{busy === 'save' ? <RefreshCw size={14} className="animate-spin" /> : <Save size={14} />} Save changes</button></div>
+        </form>
+        <div className="border-t border-red-500/15 bg-red-500/[0.025] p-5">
+          <h3 className="text-sm font-medium text-red-200">Delete server</h3>
+          <p className="mt-2 text-xs leading-5 text-zinc-500">Permanently deletes this server's world, mods, configuration, console log, and all BLSM backups. This cannot be undone.</p>
+          <div className="mt-4 flex flex-col gap-3 sm:flex-row"><input className="input flex-1" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} placeholder={`Type ${server.name} to confirm`} /><button type="button" className="btn-danger shrink-0" disabled={!stopped || Boolean(busy) || confirmation !== server.name} onClick={() => void remove()}>{busy === 'delete' ? <RefreshCw size={14} className="animate-spin" /> : <Trash2 size={14} />} Delete permanently</button></div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function CreateServerModal({ onClose, onCreated }: { onClose: () => void; onCreated: (server: Server) => void }) {
   const [name, setName] = useState('Minecraft Server')
   const [version, setVersion] = useState(BUNDLED_MINECRAFT_VERSIONS[0])
@@ -1291,6 +1388,7 @@ function CreateServerModal({ onClose, onCreated }: { onClose: () => void; onCrea
   const [versionsLoading, setVersionsLoading] = useState(true)
   const [versionWarning, setVersionWarning] = useState('')
   const [memory, setMemory] = useState(4096)
+  const [seed, setSeed] = useState('')
   const [eula, setEula] = useState(false)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
@@ -1312,7 +1410,7 @@ function CreateServerModal({ onClose, onCreated }: { onClose: () => void; onCrea
 
   async function submit(event: FormEvent) {
     event.preventDefault(); setBusy(true); setError('')
-    try { onCreated(await api.createServer({ name, adapter: 'minecraft-fabric', game_version: version, memory_mb: memory, server_port: 25565, rcon_port: 25575, accept_eula: eula })) }
+    try { onCreated(await api.createServer({ name, adapter: 'minecraft-fabric', game_version: version, memory_mb: memory, world_seed: seed, server_port: 25565, rcon_port: 25575, accept_eula: eula })) }
     catch (reason) { setError(reason instanceof Error ? reason.message : 'Could not create server'); setBusy(false) }
   }
   return (
@@ -1325,6 +1423,7 @@ function CreateServerModal({ onClose, onCreated }: { onClose: () => void; onCrea
             <label className="field-label">Game version<select required className="input mt-2" value={version} onChange={(event) => setVersion(event.target.value)}>{versions.map((item) => <option key={item} value={item}>{item}</option>)}</select><span className={`mt-2 block text-xs leading-5 ${versionWarning ? 'text-amber-300/70' : 'text-zinc-600'}`}>{versionsLoading ? 'Loading stable Fabric releases…' : versionWarning || `${versions.length} stable Fabric releases available.`}</span></label>
             <label className="field-label">Memory<select className="input mt-2" value={memory} onChange={(event) => setMemory(Number(event.target.value))}><option value={2048}>2 GB</option><option value={4096}>4 GB</option><option value={6144}>6 GB</option><option value={8192}>8 GB</option><option value={10240}>10 GB</option><option value={12288}>12 GB</option></select></label>
           </div>
+          <label className="field-label">World seed<input className="input mt-2 font-mono" maxLength={128} value={seed} onChange={(event) => setSeed(event.target.value)} placeholder="Random seed" /><span className="mt-2 block text-xs leading-5 text-zinc-600">Optional. Text and numeric Minecraft seeds are supported.</span></label>
           <label className="flex cursor-pointer gap-3 rounded-lg border border-zinc-800 bg-zinc-900/40 p-4"><input type="checkbox" checked={eula} onChange={(event) => setEula(event.target.checked)} className="mt-0.5 size-4 accent-blue-500" /><span><span className="block text-sm text-zinc-300">Accept the Minecraft EULA</span><span className="mt-1 block text-xs leading-5 text-zinc-600">Required before BLSM can install and start the server. You confirm you have reviewed Mojang's EULA.</span></span></label>
           {error && <p className="text-sm text-red-300">{error}</p>}
         </div>

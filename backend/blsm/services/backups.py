@@ -131,6 +131,12 @@ class BackupService:
     async def delete(self, server_id: str, backup_id: str) -> None:
         await self._exclusive(server_id, "delete", self._delete(server_id, backup_id))
 
+    async def purge_server(self, server_id: str) -> None:
+        """Remove only backup data rooted in this BLSM server's own directory."""
+        await self._exclusive(
+            server_id, "delete_server", self._purge_server(server_id)
+        )
+
     def download_path(self, server_id: str, backup_id: str) -> tuple[Path, dict[str, Any]]:
         record = self._complete_record(server_id, backup_id)
         path = self._record_path(record)
@@ -481,6 +487,17 @@ class BackupService:
             raise BackupError("Backup not found")
         self._record_path(record).unlink(missing_ok=True)
         self.db.delete_backup_record(server_id, backup_id)
+
+    async def _purge_server(self, server_id: str) -> None:
+        directory = self.backups_dir / server_id
+        if directory.parent.resolve() != self.backups_dir:
+            raise BackupError("Refusing to delete an unsafe backup path")
+        if directory.is_symlink():
+            directory.unlink()
+        elif directory.exists():
+            shutil.rmtree(directory)
+        marker = self.backups_dir / f"restore-{server_id}.json"
+        marker.unlink(missing_ok=True)
 
     async def _cleanup_retention(
         self, server_id: str, policy: dict[str, Any], protected: set[str]

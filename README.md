@@ -5,7 +5,7 @@ BLSM (pronounced “Blossom”) is a lightweight, LAN-first game-server control 
 ## What works
 
 - Secure one-time administrator setup, scrypt password storage, signed 12-hour sessions, and origin-restricted browser access
-- Fabric server installation, EULA gate, configurable memory/version, and start/stop/restart controls
+- Fabric server installation, EULA gate, world seed, configurable memory/version, upgrades, and start/stop/restart controls
 - Detached Minecraft process groups: the game keeps running if the BLSM web process restarts
 - Crash detection, PID/memory/CPU/uptime telemetry, disk-backed live console, and RCON command input
 - Live player presence, whitelist enforcement and membership, and operator management
@@ -142,6 +142,14 @@ Installing or managing a mod now opens a version resolver instead of immediately
 Before presenting an approval plan, BLSM validates the complete server mod set against the server's Minecraft, Fabric Loader, and Java versions. It combines Modrinth's required/incompatible dependency records with each jar's root and declared nested `fabric.mod.json` files, including `depends`, `breaks`, and `conflicts`. Duplicate nested libraries are treated as version alternatives, matching Fabric Loader's jar-in-jar resolution, rather than as duplicate top-level mods. Missing dependencies are resolved recursively. Existing mods remain pinned when possible; any necessary install, upgrade, or downgrade is listed with its reason. BLSM never removes a mod as part of resolution.
 
 Resolution may run while Minecraft is online, but **Approve and apply** remains unavailable until the server is stopped. Approved plans expire after ten minutes and are rejected if the installed-mod database or jar directory changed. Application stages verified files on the same filesystem, swaps only BLSM-managed jars, and updates SQLite last. A failure restores the previous jars and database records. Manually copied Fabric jars participate in compatibility checks but cannot be upgraded automatically because they have no trusted Modrinth project/version association.
+
+### Managing a server
+
+Open the three-dot menu in the server header to rename a server, change its RAM allocation, set its world seed before generation, or upgrade to a newer stable Minecraft release. Stop the server before saving. An upgrade downloads and validates a new Fabric launcher, swaps it transactionally, and leaves the world, mods, `server.properties`, and backups untouched. Review installed-mod compatibility before starting the upgraded server.
+
+The world seed can also be entered while creating a server. Once the configured world has a `level.dat`, BLSM locks this field because changing `level-seed` would not replace the seed stored in an existing world.
+
+The same dialog contains permanent deletion. Type the server's exact name to confirm. Deletion is allowed only while the server is offline and removes that BLSM-managed server directory, its database records, and its BLSM backup directory. External servers and paths outside BLSM's managed server root are refused.
 
 ### Uninstalling
 

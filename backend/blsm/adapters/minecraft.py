@@ -7,6 +7,8 @@ import secrets
 import shutil
 import subprocess
 import tempfile
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -36,27 +38,19 @@ class MinecraftFabricAdapter(ServerAdapter):
             AdapterCapability.GAME_RULES,
             AdapterCapability.FILES,
             AdapterCapability.BACKUPS,
+            AdapterCapability.MANAGEMENT,
         }
     )
 
     async def install(self, path: Path, config: dict[str, Any]) -> dict[str, Any]:
         path.mkdir(parents=True, exist_ok=True, mode=0o700)
         game_version = str(config.get("game_version", "1.21.4"))
-        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-            loader = config.get("loader_version") or await self._latest_version(
-                client, f"{FABRIC_META}/versions/loader/{game_version}"
-            )
-            installer = config.get("installer_version") or await self._latest_version(
-                client, f"{FABRIC_META}/versions/installer"
-            )
-            jar_url = (
-                f"{FABRIC_META}/versions/loader/{game_version}/{loader}/{installer}/server/jar"
-            )
-            response = await client.get(jar_url)
-            response.raise_for_status()
-            if len(response.content) < 100_000:
-                raise RuntimeError("Fabric installer returned an unexpectedly small file")
-            (path / "fabric-server-launch.jar").write_bytes(response.content)
+        launcher, loader, installer = await self._download_launcher(
+            game_version,
+            str(config["loader_version"]) if config.get("loader_version") else None,
+            str(config["installer_version"]) if config.get("installer_version") else None,
+        )
+        (path / "fabric-server-launch.jar").write_bytes(launcher)
 
         rcon_password = str(config.get("rcon_password") or secrets.token_urlsafe(24))
         rcon_port = int(config.get("rcon_port", 25575))
@@ -73,6 +67,9 @@ class MinecraftFabricAdapter(ServerAdapter):
                 "motd": str(config.get("motd", "Managed by BLSM")),
             }
         )
+        world_seed = str(config.get("world_seed", "")).strip()
+        if world_seed:
+            existing["level-seed"] = world_seed
         self._write_properties(properties, existing)
         if config.get("accept_eula"):
             (path / "eula.txt").write_text("eula=true\n", encoding="utf-8")
@@ -86,7 +83,169 @@ class MinecraftFabricAdapter(ServerAdapter):
             "rcon_port": rcon_port,
             "server_port": server_port,
             "memory_mb": max(1024, int(config.get("memory_mb", 4096))),
+            "world_seed": world_seed,
         }
+
+    async def _download_launcher(
+        self,
+        game_version: str,
+        loader_version: str | None = None,
+        installer_version: str | None = None,
+    ) -> tuple[bytes, str, str]:
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+            loader = loader_version or await self._latest_version(
+                client, f"{FABRIC_META}/versions/loader/{game_version}"
+            )
+            installer = installer_version or await self._latest_version(
+                client, f"{FABRIC_META}/versions/installer"
+            )
+            response = await client.get(
+                f"{FABRIC_META}/versions/loader/{game_version}/{loader}/{installer}/server/jar"
+            )
+            response.raise_for_status()
+            if len(response.content) < 100_000:
+                raise RuntimeError("Fabric installer returned an unexpectedly small file")
+        return response.content, loader, installer
+
+    def public_config(self, path: Path, config: dict[str, Any]) -> dict[str, Any]:
+        result = dict(config)
+        properties_path = path / "server.properties"
+        properties: dict[str, str] = {}
+        if properties_path.is_file() and not properties_path.is_symlink():
+            properties = self._read_properties(properties_path)
+        result["world_seed"] = properties.get(
+            "level-seed", str(config.get("world_seed", ""))
+        )
+        result["world_seed_locked"] = self._world_generated(path, properties)
+        return result
+
+    @asynccontextmanager
+    async def configuration_transaction(
+        self, path: Path, config: dict[str, Any], values: dict[str, str | int]
+    ) -> AsyncIterator[dict[str, Any]]:
+        unknown = values.keys() - {"memory_mb", "world_seed", "game_version"}
+        if unknown:
+            raise ValueError(
+                f"Unsupported server configuration: {', '.join(sorted(unknown))}"
+            )
+        normalized = dict(config)
+        properties_path = path / "server.properties"
+        properties_changed = False
+        properties = self._read_properties(properties_path)
+        original_properties = (
+            properties_path.read_bytes()
+            if properties_path.is_file() and not properties_path.is_symlink()
+            else None
+        )
+        if properties_path.is_symlink():
+            raise RuntimeError("Refusing to manage a symlinked server.properties file")
+
+        if "memory_mb" in values:
+            memory = values["memory_mb"]
+            if type(memory) is not int or not 1024 <= memory <= 14336:
+                raise ValueError("Memory allocation must be between 1024 and 14336 MB")
+            normalized["memory_mb"] = memory
+
+        if "world_seed" in values:
+            seed = values["world_seed"]
+            if not isinstance(seed, str):
+                raise ValueError("World seed must be text or a whole number")
+            seed = seed.strip()
+            if len(seed) > 128 or any(character in seed for character in "\r\n\x00"):
+                raise ValueError("World seed is invalid")
+            current_seed = properties.get("level-seed", str(config.get("world_seed", "")))
+            if seed != current_seed and self._world_generated(path, properties):
+                raise ValueError(
+                    "The world has already been generated; changing level-seed would not "
+                    "replace its stored seed. Restore or create a different world instead."
+                )
+            properties["level-seed"] = seed
+            normalized["world_seed"] = seed
+            properties_changed = seed != current_seed
+
+        staging: Path | None = None
+        launcher_backup: Path | None = None
+        launcher_path = path / "fabric-server-launch.jar"
+        if "game_version" in values:
+            target = values["game_version"]
+            if not isinstance(target, str) or re.fullmatch(r"[0-9A-Za-z.+_-]+", target) is None:
+                raise ValueError("Game version is invalid")
+            current = str(config.get("game_version", ""))
+            if target != current:
+                if self._version_key(target) <= self._version_key(current):
+                    raise ValueError("Select a newer Minecraft version")
+                available = await self.available_versions()
+                if target not in available:
+                    raise ValueError(
+                        "The selected Minecraft version is not a stable Fabric release"
+                    )
+                upgraded = {**normalized, "game_version": target}
+                upgraded.pop("loader_version", None)
+                upgraded.pop("installer_version", None)
+                self.validate_environment(path, upgraded)
+                if self.is_installed(path):
+                    launcher, loader, installer = await self._download_launcher(target)
+                    descriptor, staging_name = tempfile.mkstemp(
+                        prefix=".fabric-upgrade.", suffix=".jar", dir=path
+                    )
+                    staging = Path(staging_name)
+                    with os.fdopen(descriptor, "wb") as handle:
+                        handle.write(launcher)
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                    staging.chmod(0o600)
+                    upgraded["loader_version"] = loader
+                    upgraded["installer_version"] = installer
+                normalized = upgraded
+
+        applied_launcher = False
+        success = False
+        try:
+            if properties_changed:
+                self._write_properties(properties_path, properties)
+            if staging is not None:
+                if launcher_path.is_symlink():
+                    raise RuntimeError("Refusing to replace a symlinked Fabric launcher")
+                descriptor, backup_name = tempfile.mkstemp(
+                    prefix=".fabric-launcher-backup.", suffix=".jar", dir=path
+                )
+                os.close(descriptor)
+                launcher_backup = Path(backup_name)
+                launcher_backup.unlink()
+                if launcher_path.is_file():
+                    launcher_path.replace(launcher_backup)
+                staging.replace(launcher_path)
+                applied_launcher = True
+            yield normalized
+            success = True
+        finally:
+            if not success:
+                if applied_launcher:
+                    launcher_path.unlink(missing_ok=True)
+                if launcher_backup is not None and launcher_backup.is_file():
+                    launcher_backup.replace(launcher_path)
+                if properties_changed:
+                    if original_properties is None:
+                        properties_path.unlink(missing_ok=True)
+                    else:
+                        properties_path.write_bytes(original_properties)
+            if staging is not None:
+                staging.unlink(missing_ok=True)
+            if launcher_backup is not None:
+                launcher_backup.unlink(missing_ok=True)
+
+    @staticmethod
+    def _version_key(value: str) -> tuple[int, ...]:
+        parts = re.match(r"^(\d+(?:\.\d+)*)", value)
+        return tuple(int(part) for part in parts.group(1).split(".")) if parts else (0,)
+
+    @staticmethod
+    def _world_generated(path: Path, properties: dict[str, str]) -> bool:
+        root = path.resolve()
+        world = (root / properties.get("level-name", "world")).resolve()
+        if world == root or root not in world.parents:
+            return True
+        return (world / "level.dat").is_file()
 
     def mod_loader(self, config: dict[str, Any]) -> str:
         del config

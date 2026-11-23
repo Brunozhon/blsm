@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -18,6 +19,7 @@ class AdapterCapability(str, Enum):
     GAME_RULES = "game_rules"
     FILES = "files"
     BACKUPS = "backups"
+    MANAGEMENT = "management"
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,6 +78,17 @@ class ServerAdapter(ABC):
     ) -> tuple[ModPackageMetadata, ...]:
         """Return normalized package-native dependency metadata."""
         raise NotImplementedError("This server adapter does not manage mods")
+
+    def public_config(self, path: Path, config: dict[str, Any]) -> dict[str, Any]:
+        """Return adapter-owned configuration safe for the dashboard."""
+        del path
+        return dict(config)
+
+    def configuration_transaction(
+        self, path: Path, config: dict[str, Any], values: dict[str, str | int]
+    ) -> AbstractAsyncContextManager[dict[str, Any]]:
+        """Stage an offline configuration change with rollback around persistence."""
+        raise NotImplementedError("This server adapter does not expose management settings")
 
     def validate_environment(self, path: Path, config: dict[str, Any]) -> None:
         """Raise a useful error when host runtime requirements are not met."""

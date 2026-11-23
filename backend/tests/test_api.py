@@ -243,3 +243,51 @@ async def test_first_run_auth_and_server_creation(tmp_path: Path, monkeypatch: A
         assert mutation_status == 409
         assert mutation["detail"] == "Start the server to manage players"
 
+        update_status, updated_server = await request_json(
+            app,
+            "PATCH",
+            f"/api/servers/{body['id']}",
+            {
+                "name": "Renamed Survival",
+                "config": {
+                    "memory_mb": 4096,
+                    "world_seed": "BLSM test seed",
+                    "game_version": "1.21.4",
+                },
+            },
+            {"Authorization": f"Bearer {setup['token']}"},
+        )
+        assert update_status == 200
+        assert updated_server["name"] == "Renamed Survival"
+        assert updated_server["config"]["memory_mb"] == 4096
+        assert updated_server["config"]["world_seed"] == "BLSM test seed"
+        assert "level-seed=BLSM test seed" in (
+            server_path / "server.properties"
+        ).read_text(encoding="utf-8")
+
+        wrong_delete_status, wrong_delete = await request_json(
+            app,
+            "DELETE",
+            f"/api/servers/{body['id']}",
+            {"confirmation": "wrong name"},
+            {"Authorization": f"Bearer {setup['token']}"},
+        )
+        assert wrong_delete_status == 400
+        assert "exact server name" in wrong_delete["detail"]
+
+        backup_directory = tmp_path / "backups" / body["id"]
+        backup_directory.mkdir()
+        (backup_directory / "test.tar.gz").write_bytes(b"backup")
+        delete_status, deleted = await request_json(
+            app,
+            "DELETE",
+            f"/api/servers/{body['id']}",
+            {"confirmation": "Renamed Survival"},
+            {"Authorization": f"Bearer {setup['token']}"},
+        )
+        assert delete_status == 200
+        assert deleted == {"deleted": True}
+        assert app.state.db.get_server(body["id"]) is None
+        assert not server_path.exists()
+        assert not backup_directory.exists()
+
