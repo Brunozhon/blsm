@@ -16,7 +16,7 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 
 from .adapters.base import AdapterCapability
 from .auth import hash_password, require_admin, verify_password
@@ -25,6 +25,7 @@ from .schemas import (
     ConsoleCommand,
     GameRulesUpdate,
     ModInstall,
+    ModpackBuild,
     PasswordPayload,
     PlayerAccess,
     ServerCreate,
@@ -32,6 +33,7 @@ from .schemas import (
     WhitelistSetting,
 )
 from .services.backups import BackupBusy, BackupError
+from .services.modrinth import PACK_MIME
 
 router = APIRouter(prefix="/api")
 
@@ -519,6 +521,52 @@ async def search_mods(
 async def list_mods(request: Request, server_id: str) -> list[dict[str, Any]]:
     _server_or_404(request, server_id)
     return request.app.state.db.list_mods(server_id)
+
+
+@router.get("/servers/{server_id}/modpack", dependencies=[Depends(require_admin)])
+async def modpack_preview(request: Request, server_id: str) -> dict[str, Any]:
+    server = _server_or_404(request, server_id)
+    _capability_adapter(
+        request,
+        server,
+        AdapterCapability.MODPACKS,
+        "This server adapter does not support client modpacks",
+    )
+    try:
+        return await request.app.state.modrinth.modpack_preview(server)
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail="Modrinth is currently unavailable") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.post("/servers/{server_id}/modpack", dependencies=[Depends(require_admin)])
+async def build_modpack(
+    request: Request, server_id: str, payload: ModpackBuild
+) -> Response:
+    server = _server_or_404(request, server_id)
+    _capability_adapter(
+        request,
+        server,
+        AdapterCapability.MODPACKS,
+        "This server adapter does not support client modpacks",
+    )
+    try:
+        content, filename = await request.app.state.modrinth.build_modpack(
+            server,
+            payload.name,
+            payload.version_id,
+            payload.selected_project_ids,
+        )
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail="Modrinth is currently unavailable") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return Response(
+        content=content,
+        media_type=PACK_MIME,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.post("/servers/{server_id}/mods", dependencies=[Depends(require_admin)])

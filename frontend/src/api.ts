@@ -1,4 +1,4 @@
-import type { BackupPolicy, BackupRecord, BackupState, GameRules, InstalledMod, ModResult, PlayerState, Server, ServerSettings, Stats } from './types'
+import type { BackupPolicy, BackupRecord, BackupState, GameRules, InstalledMod, ModpackPreview, ModResult, PlayerState, Server, ServerSettings, Stats } from './types'
 
 const TOKEN_KEY = 'blsm_session'
 
@@ -29,10 +29,15 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   return response.json() as Promise<T>
 }
 
-async function download(path: string): Promise<Blob> {
+async function download(path: string, options: RequestInit = {}): Promise<Blob> {
   const token = session.get()
   const response = await fetch(`/api${path}`, {
-    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    ...options,
+    headers: {
+      ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...options.headers,
+    },
   })
   if (response.status === 401) {
     session.clear()
@@ -120,4 +125,7 @@ export const api = {
     request<InstalledMod>(`/servers/${id}/mods/${projectId}/update`, { method: 'POST' }),
   removeMod: (id: string, projectId: string) =>
     request<{ removed: boolean }>(`/servers/${id}/mods/${projectId}`, { method: 'DELETE' }),
+  modpackPreview: (id: string) => request<ModpackPreview>(`/servers/${id}/modpack`),
+  generateModpack: (id: string, payload: { name: string; version_id: string; selected_project_ids: string[] }) =>
+    download(`/servers/${id}/modpack`, { method: 'POST', body: JSON.stringify(payload) }),
 }

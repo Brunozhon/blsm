@@ -10,6 +10,7 @@ from typing import Any
 class AdapterCapability(str, Enum):
     CONSOLE = "console"
     MODS = "mods"
+    MODPACKS = "modpacks"
     PLAYERS = "players"
     WHITELIST = "whitelist"
     OPERATORS = "operators"

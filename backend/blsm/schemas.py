@@ -82,6 +82,26 @@ class ModInstall(BaseModel):
     title: str | None = Field(default=None, max_length=256)
 
 
+class ModpackBuild(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
+    version_id: str = Field(
+        default="1.0.0", min_length=1, max_length=64, pattern=r"^[0-9A-Za-z._+-]+$"
+    )
+    selected_project_ids: list[str] = Field(min_length=1, max_length=256)
+
+    @field_validator("selected_project_ids")
+    @classmethod
+    def validate_project_ids(cls, values: list[str]) -> list[str]:
+        if len(values) != len(set(values)):
+            raise ValueError("Selected project IDs must be unique")
+        for value in values:
+            if not 1 <= len(value) <= 128 or not all(
+                character.isalnum() or character in "_-" for character in value
+            ):
+                raise ValueError("Invalid Modrinth project ID")
+        return values
+
+
 class ServerView(BaseModel):
     id: str
     name: str

@@ -13,6 +13,7 @@ BLSM (pronounced “Blossom”) is a lightweight, LAN-first game-server control 
 - Searchable Settings tab for every `server.properties` value, with typed controls, concise guidance, masked secrets, and support for future properties
 - Modrinth search filtered to the server's Minecraft and Fabric versions
 - Verified mod install, update, and removal (downloads are checked against Modrinth SHA-512 hashes)
+- Downloadable Modrinth client packs with automatic required-dependency resolution and per-mod selection
 - Manual and scheduled compressed backups with history, downloads, retention cleanup, restoration, and automatic pre-restore safety snapshots
 - Capability-driven React UI and a modular `ServerAdapter` backend boundary
 
@@ -127,6 +128,12 @@ Both frequency and retention limits are configurable in the dashboard. The oldes
 Restoration requires a fully stopped server and accepts only a complete backup created for that same server and adapter. Before changing files, BLSM creates a `pre_restore` safety backup. It validates archive paths and file types, extracts into a same-filesystem staging directory, and atomically swaps the server directory. A restore journal rolls back an interrupted swap when BLSM starts again. Downloaded archives contain server secrets such as the RCON password in `server.properties`; store them accordingly.
 
 Scheduling is interval-based rather than cron-based, and requires the BLSM service to be running. Missed jobs become due when BLSM starts again. The adapter interface includes a pre-shutdown coordination hook for a future Fabric companion mod. Until that mod exists, scheduled jobs do not provide in-game countdown warnings; they issue Minecraft's normal graceful stop when the interval becomes due.
+
+### Client modpacks
+
+The **Mods** tab can generate a standard `.mrpack` client pack. BLSM reads the exact Modrinth versions recorded for installed mods, uses each project's client-side compatibility metadata, and recursively resolves required Fabric dependencies for the server's Minecraft version. Client-required and client-optional installed projects are selected initially; server-only projects are excluded. Enabling a project also enables its dependency closure, while disabling a dependency removes projects that require it.
+
+The downloaded archive contains a Modrinth index with HTTPS download references and SHA-1/SHA-512 hashes, not copied server jars, so generation uses negligible extra disk space. Import it into a launcher that supports the Modrinth pack format. Mods installed through BLSM are resolvable; manually copied jars are reported and omitted because BLSM cannot safely infer their project, version, or client compatibility. The current generator covers mods only—it does not yet bundle resource packs, shader packs, or configuration overrides.
 
 ### Uninstalling
 

@@ -36,7 +36,7 @@ import {
 } from 'lucide-react'
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api, session } from './api'
-import type { BackupPolicy, BackupRecord, BackupState, GameRule, InstalledMod, ModResult, PlayerState, Server, ServerSetting, Stats } from './types'
+import type { BackupPolicy, BackupRecord, BackupState, GameRule, InstalledMod, ModpackMod, ModpackPreview, ModResult, PlayerState, Server, ServerSetting, Stats } from './types'
 
 type View = 'overview' | 'console' | 'mods' | 'players' | 'backups' | 'game-rules' | 'settings'
 
@@ -1065,9 +1065,31 @@ function ModsView({ server, setError }: { server: Server; setError: (error: stri
   const [installed, setInstalled] = useState<InstalledMod[]>([])
   const [loading, setLoading] = useState(false)
   const [working, setWorking] = useState('')
+  const [pack, setPack] = useState<ModpackPreview | null>(null)
+  const [packLoading, setPackLoading] = useState(false)
+  const [packWorking, setPackWorking] = useState(false)
+  const [packName, setPackName] = useState(`${server.name} Client`)
+  const [packVersion, setPackVersion] = useState('1.0.0')
+  const [selectedPackMods, setSelectedPackMods] = useState<Set<string>>(new Set())
+  const supportsModpacks = server.capabilities.includes('modpacks')
 
   const loadInstalled = useCallback(() => api.installedMods(server.id).then(setInstalled).catch((reason) => setError(String(reason))), [server.id, setError])
   useEffect(() => { void loadInstalled() }, [loadInstalled])
+  const loadModpack = useCallback(async () => {
+    if (!supportsModpacks) return
+    setPackLoading(true)
+    try {
+      const preview = await api.modpackPreview(server.id)
+      setPack(preview)
+      setSelectedPackMods(new Set(preview.mods.filter((mod) => mod.default_enabled).map((mod) => mod.project_id)))
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Could not resolve client mods')
+    } finally {
+      setPackLoading(false)
+    }
+  }, [server.id, setError, supportsModpacks])
+  useEffect(() => { void loadModpack() }, [loadModpack])
+  useEffect(() => { setPackName(`${server.name} Client`) }, [server.id, server.name])
 
   async function search(event: FormEvent) {
     event.preventDefault()
@@ -1078,27 +1100,110 @@ function ModsView({ server, setError }: { server: Server; setError: (error: stri
   }
   async function install(mod: ModResult) {
     setWorking(mod.project_id)
-    try { await api.installMod(server.id, mod); await loadInstalled() }
+    try { await api.installMod(server.id, mod); await Promise.all([loadInstalled(), loadModpack()]) }
     catch (reason) { setError(reason instanceof Error ? reason.message : 'Install failed') }
     finally { setWorking('') }
   }
   async function remove(projectId: string) {
     setWorking(projectId)
-    try { await api.removeMod(server.id, projectId); await loadInstalled() }
+    try { await api.removeMod(server.id, projectId); await Promise.all([loadInstalled(), loadModpack()]) }
     catch (reason) { setError(reason instanceof Error ? reason.message : 'Remove failed') }
     finally { setWorking('') }
   }
   async function update(projectId: string) {
     setWorking(projectId)
-    try { await api.updateMod(server.id, projectId); await loadInstalled() }
+    try { await api.updateMod(server.id, projectId); await Promise.all([loadInstalled(), loadModpack()]) }
     catch (reason) { setError(reason instanceof Error ? reason.message : 'Update failed') }
     finally { setWorking('') }
   }
   const installedIds = useMemo(() => new Set(installed.map((mod) => mod.project_id)), [installed])
+  const packModsById = useMemo(() => new Map(pack?.mods.map((mod) => [mod.project_id, mod]) ?? []), [pack])
+  const packVersionValid = /^[0-9A-Za-z._+-]+$/.test(packVersion.trim())
+
+  function togglePackMod(mod: ModpackMod) {
+    if (!mod.eligible) return
+    setSelectedPackMods((current) => {
+      const next = new Set(current)
+      if (!next.has(mod.project_id)) {
+        const pending = [mod.project_id]
+        while (pending.length) {
+          const projectId = pending.pop()
+          if (!projectId || next.has(projectId)) continue
+          const candidate = packModsById.get(projectId)
+          if (!candidate) continue
+          next.add(projectId)
+          pending.push(...candidate.required_dependencies)
+        }
+      } else {
+        next.delete(mod.project_id)
+        let changed = true
+        while (changed) {
+          changed = false
+          for (const projectId of Array.from(next)) {
+            const candidate = packModsById.get(projectId)
+            if (candidate?.required_dependencies.some((dependency) => !next.has(dependency))) {
+              next.delete(projectId)
+              changed = true
+            }
+          }
+        }
+      }
+      return next
+    })
+  }
+
+  async function generateModpack() {
+    setPackWorking(true)
+    try {
+      const blob = await api.generateModpack(server.id, {
+        name: packName.trim(),
+        version_id: packVersion.trim(),
+        selected_project_ids: Array.from(selectedPackMods),
+      })
+      const url = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      const safeName = packName.trim().replace(/[^A-Za-z0-9._+-]+/g, '-').replace(/^[._-]+|[._-]+$/g, '') || 'blsm-pack'
+      anchor.href = url
+      anchor.download = `${safeName}-${packVersion.trim()}.mrpack`
+      anchor.click()
+      URL.revokeObjectURL(url)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Could not generate modpack')
+    } finally {
+      setPackWorking(false)
+    }
+  }
 
   return (
     <div className="space-y-7">
       <div><h2 className="page-title">Mods</h2><p className="page-subtitle">Fabric mods compatible with Minecraft {server.config.game_version}.</p></div>
+      {supportsModpacks && (
+        <section className="panel overflow-hidden">
+          <div className="panel-header items-start gap-4">
+            <div><div className="flex items-center gap-2"><Archive size={16} className="text-blue-400" /><h3 className="panel-title">Client modpack</h3></div><p className="panel-description">Create a Modrinth pack from compatible installed mods and their required client dependencies.</p></div>
+            <button className="btn-secondary shrink-0" disabled={packLoading} onClick={() => void loadModpack()}><RefreshCw size={14} className={packLoading ? 'animate-spin' : ''} /> Refresh</button>
+          </div>
+          <div className="space-y-5 p-5">
+            <div className="grid gap-4 md:grid-cols-[1fr_180px_auto] md:items-end">
+              <label className="field-label">Pack name<input className="input mt-2" maxLength={64} value={packName} onChange={(event) => setPackName(event.target.value)} /></label>
+              <label className="field-label">Pack version<input className="input mt-2" maxLength={64} pattern="[0-9A-Za-z._+\-]+" value={packVersion} onChange={(event) => setPackVersion(event.target.value)} /></label>
+              <button className="btn-primary h-10" disabled={packWorking || packLoading || selectedPackMods.size === 0 || !packName.trim() || !packVersionValid} onClick={() => void generateModpack()}>{packWorking ? <RefreshCw size={14} className="animate-spin" /> : <Download size={14} />} Download .mrpack</button>
+            </div>
+            <div className="flex flex-wrap items-center justify-between gap-2 border-y border-zinc-800/70 py-3 text-xs text-zinc-500"><span>{selectedPackMods.size} of {pack?.mods.length ?? 0} projects selected</span><span>Client-required and optional installed mods are selected automatically.</span></div>
+            {pack?.warnings.map((warning) => <div key={warning} className="rounded-lg border border-amber-500/20 bg-amber-500/[0.04] px-3 py-2 text-xs leading-5 text-amber-200/75">{warning}</div>)}
+            {packLoading && !pack ? <div className="grid min-h-28 place-items-center text-sm text-zinc-600"><RefreshCw size={17} className="animate-spin" /></div> : pack && pack.mods.length > 0 ? (
+              <div className="grid gap-2 lg:grid-cols-2">
+                {pack.mods.map((mod) => {
+                  const selected = selectedPackMods.has(mod.project_id)
+                  const sideLabel = mod.client_side === 'required' ? 'Client required' : mod.client_side === 'optional' ? 'Client optional' : mod.client_side === 'unsupported' ? 'Server only' : 'Client support unknown'
+                  return <button type="button" key={mod.project_id} aria-pressed={selected} disabled={!mod.eligible} onClick={() => togglePackMod(mod)} className={`flex items-center gap-3 rounded-lg border p-3 text-left transition ${selected ? 'border-blue-500/35 bg-blue-500/[0.07]' : 'border-zinc-800 bg-zinc-900/30 hover:border-zinc-700'} disabled:cursor-not-allowed disabled:opacity-45`}><span className={`grid size-5 shrink-0 place-items-center rounded border text-[11px] ${selected ? 'border-blue-400 bg-blue-500 text-white' : 'border-zinc-700 text-transparent'}`}>✓</span><span className="min-w-0 flex-1"><span className="block truncate text-sm font-medium text-zinc-200">{mod.title}</span><span className="mt-1 block truncate text-xs text-zinc-600">{mod.version_number} · {mod.source === 'dependency' ? 'Auto dependency' : sideLabel}</span></span><span className={`rounded-md px-2 py-1 text-[10px] font-medium ${mod.client_side === 'required' ? 'bg-blue-500/10 text-blue-300' : 'bg-zinc-800 text-zinc-500'}`}>{sideLabel}</span></button>
+                })}
+              </div>
+            ) : <div className="py-8 text-center"><Archive className="mx-auto text-zinc-700" size={21} /><p className="mt-3 text-sm text-zinc-500">No Modrinth-managed mods are installed.</p><p className="mt-1 text-xs text-zinc-700">Install mods below, then refresh the client pack.</p></div>}
+            <p className="text-xs leading-5 text-zinc-600">The pack contains verified Modrinth download references, not copies of server jars. Import the downloaded file into a launcher that supports the Modrinth pack format.</p>
+          </div>
+        </section>
+      )}
       <form onSubmit={search} className="relative max-w-2xl"><Search className="absolute left-3.5 top-1/2 -translate-y-1/2 text-zinc-600" size={17} /><input className="input h-11 pl-10 pr-24" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search Modrinth…" /><button className="absolute right-1.5 top-1.5 rounded-md bg-zinc-800 px-3 py-1.5 text-sm text-zinc-300 transition hover:bg-zinc-700">{loading ? 'Searching…' : 'Search'}</button></form>
       {installed.length > 0 && (
         <section>

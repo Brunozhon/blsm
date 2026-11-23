@@ -27,6 +27,7 @@ class MinecraftFabricAdapter(ServerAdapter):
         {
             AdapterCapability.CONSOLE,
             AdapterCapability.MODS,
+            AdapterCapability.MODPACKS,
             AdapterCapability.PLAYERS,
             AdapterCapability.WHITELIST,
             AdapterCapability.OPERATORS,

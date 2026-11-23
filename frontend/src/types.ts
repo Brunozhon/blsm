@@ -116,3 +116,27 @@ export interface InstalledMod {
   installed_at: string
 }
 
+export type ModrinthEnvironment = 'required' | 'optional' | 'unsupported' | 'unknown'
+
+export interface ModpackMod {
+  project_id: string
+  version_id: string
+  version_number: string
+  title: string
+  filename: string
+  icon_url?: string | null
+  client_side: ModrinthEnvironment
+  source: 'installed' | 'dependency'
+  required_by: string[]
+  required_dependencies: string[]
+  eligible: boolean
+  default_enabled: boolean
+}
+
+export interface ModpackPreview {
+  game_version: string
+  loader_version?: string | null
+  mods: ModpackMod[]
+  warnings: string[]
+}
+
