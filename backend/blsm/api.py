@@ -5,15 +5,18 @@ import re
 import shutil
 import uuid
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Annotated, Any, NoReturn
 
 import httpx
 from fastapi import (
     APIRouter,
     Depends,
+    File,
+    Form,
     HTTPException,
     Query,
     Request,
+    UploadFile,
     WebSocket,
     WebSocketDisconnect,
 )
@@ -24,6 +27,9 @@ from .auth import hash_password, require_admin, verify_password
 from .schemas import (
     BackupPolicyUpdate,
     ConsoleCommand,
+    FileContentUpdate,
+    FileCreate,
+    FileRename,
     GameRulesUpdate,
     ModInstall,
     ModpackBuild,
@@ -37,6 +43,7 @@ from .schemas import (
     WhitelistSetting,
 )
 from .services.backups import BackupBusy, BackupError
+from .services.files import FileConflict, FileManagerError, FileTooLarge
 from .services.mod_resolution import ModResolutionError
 from .services.modrinth import PACK_MIME
 
@@ -376,6 +383,162 @@ async def update_server_settings(
     request.app.state.db.update_server_config(server_id, config)
     updated = _server_or_404(request, server_id)
     return _settings_view(adapter, updated)
+
+
+def _file_server(request: Request, server_id: str) -> tuple[dict[str, Any], Path]:
+    server = _server_or_404(request, server_id)
+    _capability_adapter(
+        request,
+        server,
+        AdapterCapability.FILES,
+        "This server does not expose managed files",
+    )
+    root = Path(server["path"])
+    managed_root = request.app.state.settings.servers_dir.resolve()
+    if root.is_symlink() or root.resolve().parent != managed_root:
+        raise HTTPException(status_code=409, detail="The managed server path is unsafe")
+    return server, root
+
+
+def _raise_file_error(exc: FileManagerError) -> NoReturn:
+    if isinstance(exc, FileTooLarge):
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
+    if isinstance(exc, FileConflict):
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/servers/{server_id}/files", dependencies=[Depends(require_admin)])
+async def server_files(
+    request: Request,
+    server_id: str,
+    path: str = Query(default=".", max_length=1024),
+) -> dict[str, object]:
+    _, root = _file_server(request, server_id)
+    try:
+        return request.app.state.files.list_directory(root, path)
+    except FileManagerError as exc:
+        _raise_file_error(exc)
+
+
+@router.get("/servers/{server_id}/files/content", dependencies=[Depends(require_admin)])
+async def server_file_content(
+    request: Request,
+    server_id: str,
+    path: str = Query(min_length=1, max_length=1024),
+) -> dict[str, object]:
+    server, root = _file_server(request, server_id)
+    try:
+        result = request.app.state.files.read_text(root, path)
+    except FileManagerError as exc:
+        _raise_file_error(exc)
+    result["server_running"] = request.app.state.processes.status(server) == "running"
+    return result
+
+
+@router.put("/servers/{server_id}/files/content", dependencies=[Depends(require_admin)])
+async def update_server_file(
+    request: Request,
+    server_id: str,
+    payload: FileContentUpdate,
+    path: str = Query(min_length=1, max_length=1024),
+) -> dict[str, object]:
+    server, root = _file_server(request, server_id)
+    _require_no_backup_operation(request, server_id)
+    try:
+        result = request.app.state.files.write_text(
+            root,
+            path,
+            payload.content,
+            payload.revision,
+        )
+    except FileManagerError as exc:
+        _raise_file_error(exc)
+    result["server_running"] = request.app.state.processes.status(server) == "running"
+    return result
+
+
+@router.post(
+    "/servers/{server_id}/files", dependencies=[Depends(require_admin)], status_code=201
+)
+async def create_server_file(
+    request: Request, server_id: str, payload: FileCreate
+) -> dict[str, object]:
+    _, root = _file_server(request, server_id)
+    _require_no_backup_operation(request, server_id)
+    try:
+        return request.app.state.files.create(root, payload.path, payload.kind)
+    except FileManagerError as exc:
+        _raise_file_error(exc)
+
+
+@router.put("/servers/{server_id}/files/rename", dependencies=[Depends(require_admin)])
+async def rename_server_file(
+    request: Request, server_id: str, payload: FileRename
+) -> dict[str, str]:
+    _, root = _file_server(request, server_id)
+    _require_no_backup_operation(request, server_id)
+    try:
+        return request.app.state.files.rename(root, payload.path, payload.new_name)
+    except FileManagerError as exc:
+        _raise_file_error(exc)
+
+
+@router.delete("/servers/{server_id}/files", dependencies=[Depends(require_admin)])
+async def delete_server_file(
+    request: Request,
+    server_id: str,
+    path: str = Query(min_length=1, max_length=1024),
+) -> dict[str, bool]:
+    _, root = _file_server(request, server_id)
+    _require_no_backup_operation(request, server_id)
+    try:
+        await asyncio.to_thread(request.app.state.files.delete, root, path)
+    except FileManagerError as exc:
+        _raise_file_error(exc)
+    return {"deleted": True}
+
+
+@router.post("/servers/{server_id}/files/upload", dependencies=[Depends(require_admin)])
+async def upload_server_file(
+    request: Request,
+    server_id: str,
+    upload: Annotated[UploadFile, File()],
+    path: Annotated[str, Form(max_length=1024)] = ".",
+    overwrite: Annotated[bool, Form()] = False,
+) -> dict[str, object]:
+    _, root = _file_server(request, server_id)
+    _require_no_backup_operation(request, server_id)
+    filename = upload.filename or ""
+    try:
+        return await asyncio.to_thread(
+            request.app.state.files.upload,
+            root,
+            path,
+            filename,
+            upload.file,
+            overwrite,
+        )
+    except FileManagerError as exc:
+        _raise_file_error(exc)
+    finally:
+        await upload.close()
+
+
+@router.get(
+    "/servers/{server_id}/files/download", dependencies=[Depends(require_admin)]
+)
+async def download_server_file(
+    request: Request,
+    server_id: str,
+    path: str = Query(min_length=1, max_length=1024),
+) -> FileResponse:
+    _, root = _file_server(request, server_id)
+    try:
+        download = request.app.state.files.download_path(root, path)
+    except FileManagerError as exc:
+        _raise_file_error(exc)
+    return FileResponse(download, filename=download.name)
 
 
 def _backup_server(request: Request, server_id: str) -> dict[str, Any]:

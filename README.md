@@ -11,6 +11,7 @@ BLSM (pronounced “Blossom”) is a lightweight, LAN-first game-server control 
 - Live player presence, whitelist enforcement and membership, and operator management
 - Live editing for every vanilla Minecraft 26.3 game rule, with typed controls and explanations
 - Searchable Settings tab for every `server.properties` value, with typed controls, concise guidance, masked secrets, and support for future properties
+- Confined per-server file manager with uploads, downloads, safe text editing, and configuration syntax highlighting
 - Modrinth search filtered to the server's Minecraft and Fabric versions
 - Transactional Modrinth installs, upgrades, and downgrades with stable-first dependency resolution, Fabric metadata validation, reviewable plans, and SHA-512 verification
 - Downloadable Modrinth client packs with automatic required-dependency resolution and per-mod selection
@@ -142,6 +143,14 @@ Installing or managing a mod now opens a version resolver instead of immediately
 Before presenting an approval plan, BLSM validates the complete server mod set against the server's Minecraft, Fabric Loader, and Java versions. It combines Modrinth's required/incompatible dependency records with each jar's root and declared nested `fabric.mod.json` files, including `depends`, `breaks`, and `conflicts`. Runtime packages bundled by Fabric Loader, such as MixinExtras, are discovered from Fabric's version metadata and checksum-verified artifacts. Duplicate nested libraries are treated as version alternatives, matching Fabric Loader's jar-in-jar resolution, rather than as duplicate top-level mods. Missing dependencies are resolved recursively. Existing mods remain pinned when possible; any necessary install, upgrade, or downgrade is listed with its reason. BLSM never removes a mod as part of resolution.
 
 Resolution may run while Minecraft is online, but **Approve and apply** remains unavailable until the server is stopped. Approved plans expire after ten minutes and are rejected if the installed-mod database or jar directory changed. Application stages verified files on the same filesystem, swaps only BLSM-managed jars, and updates SQLite last. A failure restores the previous jars and database records. Manually copied Fabric jars participate in compatibility checks but cannot be upgraded automatically because they have no trusted Modrinth project/version association.
+
+### Server file manager
+
+The **Files** tab browses only the selected BLSM-managed server directory. It supports creating, renaming, deleting, uploading, and downloading files and directories. UTF-8 text files up to 2 MiB can be edited in the dashboard; TOML, JSON, JSON5, YAML, and properties files receive lightweight syntax highlighting. Uploads are limited to 256 MiB and are written to an incomplete file before an atomic rename, so interrupted uploads do not replace existing data.
+
+Edits use revision checks and atomic replacement to avoid silently overwriting a file changed by Minecraft or another administrator. The dashboard warns before discarding unsaved changes and before deletion or replacement. Editing a configuration file while the server is running is allowed, but prominently warns that the game may ignore or overwrite the change and may require a restart. Stop the server first when consistency matters.
+
+Absolute paths, parent traversal, backslash paths, and traversal through symbolic links are rejected. Symbolic links are shown but cannot be opened; deleting one removes only the link and never its target. File mutations are also refused while a backup or restore is active.
 
 ### Managing a server
 

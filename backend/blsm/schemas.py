@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, StrictBool, StrictInt, field_validator
 
@@ -52,6 +52,21 @@ class ServerUpdate(BaseModel):
 
 class ServerDelete(BaseModel):
     confirmation: str = Field(min_length=1, max_length=64)
+
+
+class FileCreate(BaseModel):
+    path: str = Field(min_length=1, max_length=1024)
+    kind: Literal["file", "directory"]
+
+
+class FileRename(BaseModel):
+    path: str = Field(min_length=1, max_length=1024)
+    new_name: str = Field(min_length=1, max_length=255)
+
+
+class FileContentUpdate(BaseModel):
+    content: str = Field(max_length=2 * 1024 * 1024)
+    revision: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
 class ConsoleCommand(BaseModel):

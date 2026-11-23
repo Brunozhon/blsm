@@ -69,6 +69,33 @@ export interface GameRules {
   online: boolean
 }
 
+export type FileLanguage = 'json' | 'json5' | 'properties' | 'toml' | 'yaml' | 'text'
+
+export interface ServerFileEntry {
+  name: string
+  path: string
+  kind: 'directory' | 'file' | 'symlink'
+  size?: number | null
+  modified_at: string
+  editable: boolean
+  language: FileLanguage
+  configuration: boolean
+}
+
+export interface ServerDirectory {
+  path: string
+  entries: ServerFileEntry[]
+}
+
+export interface ServerFileContent {
+  path: string
+  content: string
+  revision: string
+  language: FileLanguage
+  configuration: boolean
+  server_running: boolean
+}
+
 export interface BackupRecord {
   id: string
   server_id: string

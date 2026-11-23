@@ -15,6 +15,7 @@ from .auth import SessionManager, configure_admin
 from .config import Settings, read_or_create_secret
 from .db import Database
 from .services.backups import BackupService
+from .services.files import ServerFileManager
 from .services.modrinth import ModrinthService
 from .services.processes import ProcessManager
 
@@ -82,6 +83,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.sessions = SessionManager(read_or_create_secret(current_settings.data_dir))
         app.state.processes = ProcessManager(db, adapters)
         app.state.modrinth = ModrinthService(db, adapters)
+        app.state.files = ServerFileManager()
         app.state.backups = BackupService(
             db,
             app.state.processes,

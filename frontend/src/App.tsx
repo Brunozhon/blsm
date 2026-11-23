@@ -7,6 +7,7 @@ import {
   Command,
   Crown,
   Download,
+  FolderTree,
   Gauge,
   HardDrive,
   LogOut,
@@ -36,9 +37,10 @@ import {
 } from 'lucide-react'
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api, session } from './api'
+import { FileManagerView } from './FileManagerView'
 import type { BackupPolicy, BackupRecord, BackupState, GameRule, InstalledMod, ModpackMod, ModpackPreview, ModPlan, ModResult, ModVersion, PlayerState, Server, ServerSetting, Stats } from './types'
 
-type View = 'overview' | 'console' | 'mods' | 'players' | 'backups' | 'game-rules' | 'settings'
+type View = 'overview' | 'console' | 'mods' | 'players' | 'backups' | 'files' | 'game-rules' | 'settings'
 
 const BUNDLED_MINECRAFT_VERSIONS = ['26.3', '1.21.11', '1.21.10', '1.21.9', '1.21.8', '1.21.7', '1.21.6', '1.21.5', '1.21.4']
 
@@ -184,6 +186,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState('')
+  const [fileDirty, setFileDirty] = useState(false)
 
   const loadServers = useCallback(async () => {
     try {
@@ -217,6 +220,25 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
     }
   }
 
+  function navigate(next: View) {
+    if (view === 'files' && next !== 'files' && fileDirty && !window.confirm('Discard the unsaved file changes?')) return
+    setView(next)
+    setSidebarOpen(false)
+  }
+
+  function selectServer(id: string) {
+    if (id !== selectedId && view === 'files' && fileDirty && !window.confirm('Discard the unsaved file changes?')) return
+    setSelectedId(id)
+    setFileDirty(false)
+    setView('overview')
+    setSidebarOpen(false)
+  }
+
+  function logout() {
+    if (view === 'files' && fileDirty && !window.confirm('Discard the unsaved file changes and sign out?')) return
+    onLogout()
+  }
+
   return (
     <div className="min-h-screen bg-[#090a0c] text-zinc-100">
       <aside className={`fixed inset-y-0 left-0 z-40 flex w-64 flex-col border-r border-zinc-800/80 bg-[#0c0d10] transition-transform lg:translate-x-0 ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}`}>
@@ -226,7 +248,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
         </div>
         <nav className="flex-1 overflow-y-auto px-3 py-5">
           <p className="section-label px-2">Workspace</p>
-          <button className={`nav-item ${view === 'overview' ? 'nav-active' : ''}`} onClick={() => { setView('overview'); setSidebarOpen(false) }}>
+          <button className={`nav-item ${view === 'overview' ? 'nav-active' : ''}`} onClick={() => navigate('overview')}>
             <Gauge size={17} /> Overview
           </button>
           <div className="mb-2 mt-7 flex items-center justify-between px-2">
@@ -235,7 +257,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
           </div>
           <div className="space-y-1">
             {servers.map((server) => (
-              <button key={server.id} className={`nav-item ${selectedId === server.id ? 'nav-active' : ''}`} onClick={() => { setSelectedId(server.id); setView('overview'); setSidebarOpen(false) }}>
+              <button key={server.id} className={`nav-item ${selectedId === server.id ? 'nav-active' : ''}`} onClick={() => selectServer(server.id)}>
                 <span className={`status-dot ${server.status === 'running' ? 'bg-emerald-400' : server.status === 'crashed' ? 'bg-red-400' : 'bg-zinc-600'}`} />
                 <span className="min-w-0 flex-1 truncate text-left">{server.name}</span>
                 <span className="text-[11px] text-zinc-600">{server.config.game_version}</span>
@@ -246,27 +268,30 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
           {selected && (
             <div className="mt-7">
               <p className="section-label px-2">Manage</p>
-              <button className={`nav-item ${view === 'console' ? 'nav-active' : ''}`} onClick={() => { setView('console'); setSidebarOpen(false) }}><Terminal size={17} /> Console</button>
+              <button className={`nav-item ${view === 'console' ? 'nav-active' : ''}`} onClick={() => navigate('console')}><Terminal size={17} /> Console</button>
               {selected.capabilities.includes('mods') && (
-                <button className={`nav-item ${view === 'mods' ? 'nav-active' : ''}`} onClick={() => { setView('mods'); setSidebarOpen(false) }}><Boxes size={17} /> Mods</button>
+                <button className={`nav-item ${view === 'mods' ? 'nav-active' : ''}`} onClick={() => navigate('mods')}><Boxes size={17} /> Mods</button>
               )}
               {selected.capabilities.some((capability) => ['players', 'whitelist', 'operators'].includes(capability)) && (
-                <button className={`nav-item ${view === 'players' ? 'nav-active' : ''}`} onClick={() => { setView('players'); setSidebarOpen(false) }}><Users size={17} /> Players</button>
+                <button className={`nav-item ${view === 'players' ? 'nav-active' : ''}`} onClick={() => navigate('players')}><Users size={17} /> Players</button>
               )}
               {selected.capabilities.includes('backups') && (
-                <button className={`nav-item ${view === 'backups' ? 'nav-active' : ''}`} onClick={() => { setView('backups'); setSidebarOpen(false) }}><Archive size={17} /> Backups</button>
+                <button className={`nav-item ${view === 'backups' ? 'nav-active' : ''}`} onClick={() => navigate('backups')}><Archive size={17} /> Backups</button>
+              )}
+              {selected.capabilities.includes('files') && (
+                <button className={`nav-item ${view === 'files' ? 'nav-active' : ''}`} onClick={() => navigate('files')}><FolderTree size={17} /> Files</button>
               )}
               {selected.capabilities.includes('game_rules') && (
-                <button className={`nav-item ${view === 'game-rules' ? 'nav-active' : ''}`} onClick={() => { setView('game-rules'); setSidebarOpen(false) }}><SlidersHorizontal size={17} /> Game Rules</button>
+                <button className={`nav-item ${view === 'game-rules' ? 'nav-active' : ''}`} onClick={() => navigate('game-rules')}><SlidersHorizontal size={17} /> Game Rules</button>
               )}
               {selected.capabilities.includes('settings') && (
-                <button className={`nav-item ${view === 'settings' ? 'nav-active' : ''}`} onClick={() => { setView('settings'); setSidebarOpen(false) }}><Settings size={17} /> Settings</button>
+                <button className={`nav-item ${view === 'settings' ? 'nav-active' : ''}`} onClick={() => navigate('settings')}><Settings size={17} /> Settings</button>
               )}
             </div>
           )}
         </nav>
         <div className="border-t border-zinc-800/70 p-3">
-          <button className="nav-item" onClick={onLogout}><LogOut size={16} /> Sign out</button>
+          <button className="nav-item" onClick={logout}><LogOut size={16} /> Sign out</button>
         </div>
       </aside>
 
@@ -311,6 +336,8 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
             <PlayersView server={selected} setError={setError} />
           ) : view === 'backups' ? (
             <BackupsView server={selected} setError={setError} />
+          ) : view === 'files' ? (
+            <FileManagerView server={selected} setError={setError} onDirtyChange={setFileDirty} />
           ) : view === 'game-rules' ? (
             <GameRulesView server={selected} setError={setError} />
           ) : view === 'settings' ? (
@@ -318,12 +345,12 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
           ) : view === 'console' ? (
             <ConsoleView server={selected} full />
           ) : (
-            <Overview server={selected} onNavigate={setView} />
+            <Overview server={selected} onNavigate={navigate} />
           )}
         </div>
       </main>
-      {createOpen && <CreateServerModal onClose={() => setCreateOpen(false)} onCreated={(server) => { setServers((current) => [...current, server]); setSelectedId(server.id); setCreateOpen(false) }} />}
-      {manageOpen && selected && <ManageServerModal server={selected} onClose={() => setManageOpen(false)} onUpdated={(server) => setServers((current) => current.map((item) => item.id === server.id ? server : item))} onDeleted={() => { const remaining = servers.filter((item) => item.id !== selected.id); setServers(remaining); setSelectedId(remaining[0]?.id ?? null); setView('overview'); setManageOpen(false) }} />}
+      {createOpen && <CreateServerModal onClose={() => setCreateOpen(false)} onCreated={(server) => { setServers((current) => [...current, server]); if (!fileDirty) setSelectedId(server.id); setCreateOpen(false) }} />}
+      {manageOpen && selected && <ManageServerModal server={selected} onClose={() => setManageOpen(false)} onUpdated={(server) => setServers((current) => current.map((item) => item.id === server.id ? server : item))} onDeleted={() => { const remaining = servers.filter((item) => item.id !== selected.id); setServers(remaining); setSelectedId(remaining[0]?.id ?? null); setFileDirty(false); setView('overview'); setManageOpen(false) }} />}
     </div>
   )
 }
@@ -350,6 +377,7 @@ function EmptyState({ onCreate }: { onCreate: () => void }) {
 function Overview({ server, onNavigate }: { server: Server; onNavigate: (view: View) => void }) {
   const [stats, setStats] = useState<Stats>({ memory_mb: 0, cpu_percent: null, uptime_seconds: 0 })
   const [players, setPlayers] = useState<PlayerState | null>(null)
+  const supportsPlayers = server.capabilities.includes('players')
   useEffect(() => {
     const load = () => api.stats(server.id).then(setStats).catch(() => undefined)
     void load()
@@ -357,12 +385,12 @@ function Overview({ server, onNavigate }: { server: Server; onNavigate: (view: V
     return () => window.clearInterval(timer)
   }, [server.id])
   useEffect(() => {
-    if (!server.capabilities.includes('players')) return
+    if (!supportsPlayers) return
     const load = () => api.players(server.id).then(setPlayers).catch(() => undefined)
     void load()
     const timer = window.setInterval(load, 5000)
     return () => window.clearInterval(timer)
-  }, [server.id, server.status])
+  }, [server.id, server.status, supportsPlayers])
   const memoryPercent = stats.memory_limit_mb ? Math.min(100, stats.memory_mb / stats.memory_limit_mb * 100) : 0
 
   return (

@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from blsm.config import Settings
 from blsm.main import create_app
@@ -14,6 +15,7 @@ async def request_json(
     body: dict[str, Any] | None = None,
     headers: dict[str, str] | None = None,
 ) -> tuple[int, dict[str, Any]]:
+    parsed_path = urlsplit(path)
     payload = json.dumps(body).encode() if body is not None else b""
     request_headers = [(b"content-type", b"application/json")]
     request_headers.extend(
@@ -39,9 +41,9 @@ async def request_json(
             "http_version": "1.1",
             "method": method,
             "scheme": "http",
-            "path": path,
-            "raw_path": path.encode(),
-            "query_string": b"",
+            "path": parsed_path.path,
+            "raw_path": parsed_path.path.encode(),
+            "query_string": parsed_path.query.encode(),
             "root_path": "",
             "headers": request_headers,
             "client": ("127.0.0.1", 1234),
@@ -139,6 +141,7 @@ async def test_first_run_auth_and_server_creation(tmp_path: Path, monkeypatch: A
         assert "settings" in body["capabilities"]
         assert "game_rules" in body["capabilities"]
         assert "backups" in body["capabilities"]
+        assert "files" in body["capabilities"]
         assert "rcon_password" not in body["config"]
 
         backups_status, backups = await request_json(
@@ -175,6 +178,40 @@ async def test_first_run_auth_and_server_creation(tmp_path: Path, monkeypatch: A
         assert "fully stopped" in backup_error["detail"]
 
         server_path = next((tmp_path / "servers").iterdir())
+        create_file_status, created_file = await request_json(
+            app,
+            "POST",
+            f"/api/servers/{body['id']}/files",
+            {"path": "blsm.toml", "kind": "file"},
+            {"Authorization": f"Bearer {setup['token']}"},
+        )
+        assert create_file_status == 201
+        assert created_file == {"path": "blsm.toml", "kind": "file"}
+        content_status, file_content = await request_json(
+            app,
+            "GET",
+            f"/api/servers/{body['id']}/files/content?path=blsm.toml",
+            headers={"Authorization": f"Bearer {setup['token']}"},
+        )
+        assert content_status == 200
+        assert file_content["language"] == "toml"
+        save_status, saved_file = await request_json(
+            app,
+            "PUT",
+            f"/api/servers/{body['id']}/files/content?path=blsm.toml",
+            {"content": "enabled = true\n", "revision": file_content["revision"]},
+            {"Authorization": f"Bearer {setup['token']}"},
+        )
+        assert save_status == 200
+        assert saved_file["content"] == "enabled = true\n"
+        traversal_status, traversal = await request_json(
+            app,
+            "GET",
+            f"/api/servers/{body['id']}/files/content?path=..%2Foutside.txt",
+            headers={"Authorization": f"Bearer {setup['token']}"},
+        )
+        assert traversal_status == 400
+        assert traversal["detail"] == "Invalid server-relative path"
         (server_path / "server.properties").write_text(
             "motd=Test server\nrcon.password=hidden\nserver-port=25565\n",
             encoding="utf-8",

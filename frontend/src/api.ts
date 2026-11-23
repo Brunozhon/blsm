@@ -1,4 +1,4 @@
-import type { BackupPolicy, BackupRecord, BackupState, GameRules, InstalledMod, ModpackPreview, ModPlan, ModResult, ModVersion, PlayerState, Server, ServerSettings, Stats } from './types'
+import type { BackupPolicy, BackupRecord, BackupState, GameRules, InstalledMod, ModpackPreview, ModPlan, ModResult, ModVersion, PlayerState, Server, ServerDirectory, ServerFileContent, ServerSettings, Stats } from './types'
 
 const TOKEN_KEY = 'blsm_session'
 
@@ -10,10 +10,11 @@ export const session = {
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const token = session.get()
+  const multipart = typeof FormData !== 'undefined' && options.body instanceof FormData
   const response = await fetch(`/api${path}`, {
     ...options,
     headers: {
-      'Content-Type': 'application/json',
+      ...(multipart ? {} : { 'Content-Type': 'application/json' }),
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...options.headers,
     },
@@ -106,6 +107,36 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ values }),
     }),
+  files: (id: string, path = '.') =>
+    request<ServerDirectory>(`/servers/${id}/files?path=${encodeURIComponent(path)}`),
+  fileContent: (id: string, path: string) =>
+    request<ServerFileContent>(`/servers/${id}/files/content?path=${encodeURIComponent(path)}`),
+  saveFile: (id: string, path: string, content: string, revision: string) =>
+    request<ServerFileContent>(`/servers/${id}/files/content?path=${encodeURIComponent(path)}`, {
+      method: 'PUT',
+      body: JSON.stringify({ content, revision }),
+    }),
+  createFileEntry: (id: string, path: string, kind: 'file' | 'directory') =>
+    request<{ path: string; kind: string }>(`/servers/${id}/files`, {
+      method: 'POST',
+      body: JSON.stringify({ path, kind }),
+    }),
+  renameFileEntry: (id: string, path: string, newName: string) =>
+    request<{ path: string }>(`/servers/${id}/files/rename`, {
+      method: 'PUT',
+      body: JSON.stringify({ path, new_name: newName }),
+    }),
+  deleteFileEntry: (id: string, path: string) =>
+    request<{ deleted: boolean }>(`/servers/${id}/files?path=${encodeURIComponent(path)}`, { method: 'DELETE' }),
+  uploadFile: (id: string, path: string, file: File, overwrite = false) => {
+    const body = new FormData()
+    body.set('path', path)
+    body.set('overwrite', String(overwrite))
+    body.set('upload', file)
+    return request<{ path: string; size: number }>(`/servers/${id}/files/upload`, { method: 'POST', body })
+  },
+  downloadFile: (id: string, path: string) =>
+    download(`/servers/${id}/files/download?path=${encodeURIComponent(path)}`),
   backups: (id: string) => request<BackupState>(`/servers/${id}/backups`),
   createBackup: (id: string) =>
     request<BackupRecord>(`/servers/${id}/backups`, { method: 'POST' }),
