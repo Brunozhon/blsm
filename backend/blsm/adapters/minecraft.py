@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -21,6 +22,7 @@ from .minecraft_game_rules import MINECRAFT_GAME_RULES
 from .minecraft_properties import PROPERTY_METADATA, SECRET_PROPERTIES
 
 FABRIC_META = "https://meta.fabricmc.net/v2"
+MAX_LOADER_LIBRARY_BYTES = 32 * 1024 * 1024
 
 
 class MinecraftFabricAdapter(ServerAdapter):
@@ -41,6 +43,9 @@ class MinecraftFabricAdapter(ServerAdapter):
             AdapterCapability.MANAGEMENT,
         }
     )
+
+    def __init__(self) -> None:
+        self._loader_runtime_cache: dict[tuple[str, str], dict[str, str]] = {}
 
     async def install(self, path: Path, config: dict[str, Any]) -> dict[str, Any]:
         path.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -251,12 +256,97 @@ class MinecraftFabricAdapter(ServerAdapter):
         del config
         return "fabric"
 
-    def mod_runtime_versions(self, config: dict[str, Any]) -> dict[str, str]:
-        return {
+    async def mod_runtime_versions(
+        self, path: Path, config: dict[str, Any]
+    ) -> dict[str, str]:
+        del path
+        versions = {
             "minecraft": str(config.get("game_version", "")),
             "fabricloader": str(config.get("loader_version", "")),
             "java": str(self._installed_java_major()),
         }
+        game_version = versions["minecraft"]
+        loader_version = versions["fabricloader"]
+        if game_version and loader_version:
+            versions.update(
+                await self._loader_runtime_packages(game_version, loader_version)
+            )
+        return versions
+
+    async def _loader_runtime_packages(
+        self, game_version: str, loader_version: str
+    ) -> dict[str, str]:
+        cache_key = (game_version, loader_version)
+        cached = self._loader_runtime_cache.get(cache_key)
+        if cached is not None:
+            return dict(cached)
+        async with httpx.AsyncClient(timeout=30, follow_redirects=False) as client:
+            response = await client.get(
+                f"{FABRIC_META}/versions/loader/{game_version}/{loader_version}"
+            )
+            response.raise_for_status()
+            metadata = response.json()
+            if not isinstance(metadata, dict):
+                raise RuntimeError("Fabric returned invalid loader runtime metadata")
+            launcher_metadata = metadata.get("launcherMeta")
+            library_groups = (
+                launcher_metadata.get("libraries")
+                if isinstance(launcher_metadata, dict)
+                else None
+            )
+            libraries = (
+                library_groups.get("development")
+                if isinstance(library_groups, dict)
+                else None
+            )
+            if not isinstance(libraries, list):
+                raise RuntimeError("Fabric returned invalid loader library metadata")
+            packages: dict[str, str] = {}
+            for library in libraries:
+                if not isinstance(library, dict):
+                    raise RuntimeError("Fabric returned invalid loader library metadata")
+                coordinate = str(library.get("name", ""))
+                parts = coordinate.split(":")
+                if len(parts) != 3 or any(
+                    re.fullmatch(r"[A-Za-z0-9_.+-]+", part) is None for part in parts
+                ):
+                    raise RuntimeError("Fabric returned an unsafe loader library coordinate")
+                base_url = str(library.get("url", ""))
+                if base_url.rstrip("/") != "https://maven.fabricmc.net":
+                    raise RuntimeError("Fabric returned an untrusted loader library URL")
+                group, artifact, version = parts
+                try:
+                    size = int(library.get("size", 0))
+                except (TypeError, ValueError) as exc:
+                    raise RuntimeError(
+                        "Fabric returned unsafe loader library metadata"
+                    ) from exc
+                expected = str(library.get("sha512", ""))
+                if (
+                    size <= 0
+                    or size > MAX_LOADER_LIBRARY_BYTES
+                    or re.fullmatch(r"[0-9a-f]{128}", expected) is None
+                ):
+                    raise RuntimeError("Fabric returned unsafe loader library metadata")
+                artifact_url = (
+                    f"{base_url.rstrip('/')}/{group.replace('.', '/')}/{artifact}/"
+                    f"{version}/{artifact}-{version}.jar"
+                )
+                artifact_response = await client.get(artifact_url)
+                artifact_response.raise_for_status()
+                content = artifact_response.content
+                if len(content) != size or hashlib.sha512(content).hexdigest() != expected:
+                    raise RuntimeError("A Fabric Loader runtime library failed validation")
+                try:
+                    inspected = inspect_fabric_jar(content, f"{artifact}-{version}.jar")
+                except ValueError as exc:
+                    raise RuntimeError(
+                        "Could not inspect a Fabric Loader runtime library"
+                    ) from exc
+                for package in inspected:
+                    packages[package.package_id] = package.version
+        self._loader_runtime_cache[cache_key] = packages
+        return dict(packages)
 
     def inspect_mod_package(
         self, content: bytes, filename: str

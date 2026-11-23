@@ -138,7 +138,9 @@ class ModResolver:
                 target_title=target_title,
                 selected_version_id=version_id,
                 adapter=adapter,
-                runtime_versions=adapter.mod_runtime_versions(server["config"]),
+                runtime_versions=await adapter.mod_runtime_versions(
+                    Path(server["path"]), server["config"]
+                ),
                 projects=projects,
             )
             selection = await self._solve(context)

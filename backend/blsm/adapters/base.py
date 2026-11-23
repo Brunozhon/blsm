@@ -69,7 +69,9 @@ class ServerAdapter(ABC):
         """Return the repository loader key for this adapter's packages."""
         raise NotImplementedError("This server adapter does not manage mods")
 
-    def mod_runtime_versions(self, config: dict[str, Any]) -> dict[str, str]:
+    async def mod_runtime_versions(
+        self, path: Path, config: dict[str, Any]
+    ) -> dict[str, str]:
         """Return adapter-native runtime package versions used by dependency checks."""
         raise NotImplementedError("This server adapter does not manage mods")
 

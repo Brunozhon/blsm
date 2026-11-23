@@ -18,6 +18,7 @@ from blsm.services.mod_resolution import (
 )
 
 ADAPTER = MinecraftFabricAdapter()
+ADAPTER._loader_runtime_cache[("26.3", "0.18.2")] = {}
 
 
 def fabric_jar(
@@ -98,6 +99,19 @@ LITHOSTITCHED_JAR = fabric_jar(
         "depends": {"fabricloader": ">=0.17", "minecraft": "~26.3"},
     },
     BUNDLED_LIBRARIES,
+)
+LITHIUM_JAR = fabric_jar(
+    {
+        "schemaVersion": 1,
+        "id": "lithium",
+        "version": "0.26.4+mc26.3",
+        "name": "Lithium",
+        "depends": {
+            "fabricloader": ">=0.19.5",
+            "minecraft": "~26.3",
+            "mixinextras": ">=0.5.5",
+        },
+    }
 )
 
 
@@ -314,6 +328,29 @@ def test_duplicate_nested_libraries_are_resolved_as_alternatives() -> None:
         package.package_id for package in tectonic.packages if package.nested
     }
     assert nested_ids == {"apollib", "de_marhali_json5-java"}
+
+
+def test_lithium_accepts_mixinextras_supplied_by_fabric_loader() -> None:
+    lithium = resolution_module.local_candidate("lithium.jar", LITHIUM_JAR, ADAPTER)
+
+    missing = validate_candidates(
+        [lithium],
+        {"minecraft": "26.3", "fabricloader": "0.19.5", "java": "25"},
+        complete=True,
+    )
+    resolved = validate_candidates(
+        [lithium],
+        {
+            "minecraft": "26.3",
+            "fabricloader": "0.19.5",
+            "mixinextras": "0.5.5",
+            "java": "25",
+        },
+        complete=True,
+    )
+
+    assert any("requires missing package mixinextras >=0.5.5" in issue for issue in missing)
+    assert resolved == []
 
 
 @pytest.mark.asyncio

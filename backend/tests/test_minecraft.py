@@ -1,3 +1,7 @@
+import hashlib
+import io
+import json
+import zipfile
 from pathlib import Path
 from subprocess import CompletedProcess
 from typing import Any
@@ -77,6 +81,80 @@ async def test_available_versions_only_returns_stable_valid_releases(
     monkeypatch.setattr(minecraft.httpx, "AsyncClient", FakeClient)
 
     assert await MinecraftFabricAdapter().available_versions() == ["26.3", "1.21.11"]
+
+
+async def test_runtime_versions_include_loader_bundled_mixinextras(
+    monkeypatch: Any,
+) -> None:
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w") as archive:
+        archive.writestr(
+            "fabric.mod.json",
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "id": "mixinextras",
+                    "version": "0.5.5",
+                    "name": "MixinExtras",
+                }
+            ),
+        )
+    library = output.getvalue()
+    metadata = {
+        "launcherMeta": {
+            "libraries": {
+                "development": [
+                    {
+                        "name": "io.github.llamalad7:mixinextras-fabric:0.5.5",
+                        "url": "https://maven.fabricmc.net/",
+                        "size": len(library),
+                        "sha512": hashlib.sha512(library).hexdigest(),
+                    }
+                ]
+            }
+        }
+    }
+
+    class FakeResponse:
+        def __init__(self, value: Any = None, content: bytes = b"") -> None:
+            self.value = value
+            self.content = content
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> Any:
+            return self.value
+
+    class FakeClient:
+        def __init__(self, **_: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> "FakeClient":
+            return self
+
+        async def __aexit__(self, *_: Any) -> None:
+            return None
+
+        async def get(self, url: str) -> FakeResponse:
+            if url.endswith("/versions/loader/26.3/0.19.5"):
+                return FakeResponse(metadata)
+            assert url == (
+                "https://maven.fabricmc.net/io/github/llamalad7/mixinextras-fabric/"
+                "0.5.5/mixinextras-fabric-0.5.5.jar"
+            )
+            return FakeResponse(content=library)
+
+    adapter = MinecraftFabricAdapter()
+    monkeypatch.setattr(minecraft.httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(adapter, "_installed_java_major", lambda: 25)
+
+    versions = await adapter.mod_runtime_versions(
+        Path("/server"), {"game_version": "26.3", "loader_version": "0.19.5"}
+    )
+
+    assert versions["mixinextras"] == "0.5.5"
+    assert versions["fabricloader"] == "0.19.5"
 
 
 def test_rejects_java_runtime_that_is_too_old(monkeypatch: Any) -> None:
