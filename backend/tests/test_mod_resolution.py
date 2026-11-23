@@ -20,11 +20,35 @@ from blsm.services.mod_resolution import (
 ADAPTER = MinecraftFabricAdapter()
 
 
-def fabric_jar(document: dict[str, Any]) -> bytes:
+def fabric_jar(
+    document: dict[str, Any],
+    nested_documents: dict[str, dict[str, Any]] | None = None,
+) -> bytes:
+    document = dict(document)
+    if nested_documents:
+        document["jars"] = [{"file": path} for path in nested_documents]
     output = io.BytesIO()
     with zipfile.ZipFile(output, "w") as archive:
         archive.writestr("fabric.mod.json", json.dumps(document))
+        for path, nested_document in (nested_documents or {}).items():
+            archive.writestr(path, fabric_jar(nested_document))
     return output.getvalue()
+
+
+BUNDLED_LIBRARIES = {
+    "META-INF/jars/apollib.jar": {
+        "schemaVersion": 1,
+        "id": "apollib",
+        "version": "1.2.4",
+        "name": "ApolloLib",
+    },
+    "META-INF/jars/json5-java.jar": {
+        "schemaVersion": 1,
+        "id": "de_marhali_json5-java",
+        "version": "3.0.0",
+        "name": "JSON5 Java",
+    },
+}
 
 
 TERRALITH_JAR = fabric_jar(
@@ -60,8 +84,10 @@ TECTONIC_STABLE_JAR = fabric_jar(
             "fabricloader": ">=0.17",
             "minecraft": "~26.3",
             "lithostitched": ">=2.0.6",
+            "apollib": ">=1.1.6",
         },
-    }
+    },
+    BUNDLED_LIBRARIES,
 )
 LITHOSTITCHED_JAR = fabric_jar(
     {
@@ -70,7 +96,8 @@ LITHOSTITCHED_JAR = fabric_jar(
         "version": "2.0.6",
         "name": "Lithostitched",
         "depends": {"fabricloader": ">=0.17", "minecraft": "~26.3"},
-    }
+    },
+    BUNDLED_LIBRARIES,
 )
 
 
@@ -266,6 +293,27 @@ def test_fabric_version_ranges_and_tectonic_breaks_metadata() -> None:
         "terralith": "*"
     }
     assert any("Tectonic 3.1.0+beta2 breaks Terralith 2.6.5" in issue for issue in issues)
+
+
+def test_duplicate_nested_libraries_are_resolved_as_alternatives() -> None:
+    tectonic = resolution_module.local_candidate(
+        "tectonic.jar", TECTONIC_STABLE_JAR, ADAPTER
+    )
+    lithostitched = resolution_module.local_candidate(
+        "lithostitched.jar", LITHOSTITCHED_JAR, ADAPTER
+    )
+
+    issues = validate_candidates(
+        [tectonic, lithostitched],
+        {"minecraft": "26.3", "fabricloader": "0.18.2"},
+        complete=True,
+    )
+
+    assert issues == []
+    nested_ids = {
+        package.package_id for package in tectonic.packages if package.nested
+    }
+    assert nested_ids == {"apollib", "de_marhali_json5-java"}
 
 
 @pytest.mark.asyncio

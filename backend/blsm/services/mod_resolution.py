@@ -25,6 +25,7 @@ SAFE_JAR = re.compile(r"^[A-Za-z0-9_.+()-]+\.jar$")
 SAFE_ID = re.compile(r"^[0-9A-Za-z_-]+$")
 MAX_CANDIDATES_PER_PROJECT = 40
 MAX_SOLVER_STATES = 2_000
+MAX_PACKAGE_SOLVER_STATES = 2_000
 MAX_MOD_BYTES = 256 * 1024 * 1024
 PLAN_TTL_SECONDS = 10 * 60
 MAX_CACHED_PLANS = 8
@@ -781,17 +782,10 @@ def validate_candidates(
 ) -> list[str]:
     issues: list[str] = []
     by_project = {candidate.project_id: candidate for candidate in candidates}
-    providers: dict[str, tuple[Candidate, ModPackageMetadata]] = {}
+    package_choices: dict[str, list[tuple[Candidate, ModPackageMetadata]]] = {}
     for candidate in candidates:
         for package in candidate.packages:
-            previous = providers.get(package.package_id)
-            if previous and previous[0].project_id != candidate.project_id:
-                issues.append(
-                    f"{candidate.project_title} and {previous[0].project_title} both provide "
-                    f"package ID {package.package_id}"
-                )
-            else:
-                providers[package.package_id] = (candidate, package)
+            package_choices.setdefault(package.package_id, []).append((candidate, package))
 
     for candidate in candidates:
         for project_id, version_id in candidate.incompatible_projects:
@@ -801,40 +795,104 @@ def validate_candidates(
                     f"{candidate.project_title} {candidate.version_number} is incompatible with "
                     f"{other.project_title} {other.version_number} according to Modrinth"
                 )
-        for package in candidate.packages:
-            for dependency_id, requirement in package.depends.items():
-                builtin = builtins.get(dependency_id)
-                if builtin is not None:
-                    if not version_matches(builtin, requirement):
-                        issues.append(
-                            f"{package.name} {package.version} requires {dependency_id} "
-                            f"{_range_text(requirement)}, but the server has {builtin or 'unknown'}"
-                        )
-                    continue
-                provider = providers.get(dependency_id)
-                if provider is None:
-                    if complete:
-                        issues.append(
-                            f"{package.name} {package.version} requires missing package "
-                            f"{dependency_id} {_range_text(requirement)}"
-                        )
-                    continue
-                if not version_matches(provider[1].version, requirement):
+    if issues:
+        return list(dict.fromkeys(issues))
+
+    fixed: dict[str, tuple[Candidate, ModPackageMetadata]] = {}
+    alternatives: list[tuple[str, list[tuple[Candidate, ModPackageMetadata]]]] = []
+    for package_id, choices in package_choices.items():
+        top_level = [choice for choice in choices if not choice[1].nested]
+        top_level_projects = {choice[0].project_id for choice in top_level}
+        if len(top_level_projects) > 1:
+            names = sorted({choice[0].project_title for choice in top_level})
+            issues.append(
+                f"{' and '.join(names)} both provide top-level package ID {package_id}"
+            )
+        elif top_level:
+            fixed[package_id] = top_level[0]
+        elif len(choices) == 1:
+            fixed[package_id] = choices[0]
+        else:
+            # Fabric Loader treats duplicate nested JARs as candidates and selects
+            # one version that satisfies the complete dependency graph.
+            alternatives.append((package_id, choices))
+
+    if issues:
+        return list(dict.fromkeys(issues))
+
+    best_issues: list[str] = []
+    states = 0
+
+    def search_nested(
+        index: int,
+        providers: dict[str, tuple[Candidate, ModPackageMetadata]],
+    ) -> bool:
+        nonlocal best_issues, states
+        states += 1
+        if states > MAX_PACKAGE_SOLVER_STATES:
+            best_issues = ["Nested Fabric library resolution exceeded its safe complexity limit"]
+            return False
+        if index < len(alternatives):
+            package_id, choices = alternatives[index]
+            for choice in choices:
+                providers[package_id] = choice
+                if search_nested(index + 1, providers):
+                    return True
+            providers.pop(package_id, None)
+            return False
+        selected_issues = _validate_active_packages(providers, builtins, complete=complete)
+        if not selected_issues:
+            return True
+        if not best_issues or len(selected_issues) < len(best_issues):
+            best_issues = selected_issues
+        return False
+
+    if not search_nested(0, dict(fixed)):
+        issues.extend(best_issues)
+    return list(dict.fromkeys(issues))
+
+
+def _validate_active_packages(
+    providers: dict[str, tuple[Candidate, ModPackageMetadata]],
+    builtins: dict[str, str],
+    *,
+    complete: bool,
+) -> list[str]:
+    issues: list[str] = []
+    for _, package in providers.values():
+        for dependency_id, requirement in package.depends.items():
+            builtin = builtins.get(dependency_id)
+            if builtin is not None:
+                if not version_matches(builtin, requirement):
                     issues.append(
-                        f"{package.name} {package.version} requires {provider[1].name} "
-                        f"{_range_text(requirement)}, but {provider[1].version} is selected"
+                        f"{package.name} {package.version} requires {dependency_id} "
+                        f"{_range_text(requirement)}, but the server has {builtin or 'unknown'}"
                     )
-            for kind, declarations in (
-                ("breaks", package.breaks),
-                ("conflicts with", package.conflicts),
-            ):
-                for dependency_id, requirement in declarations.items():
-                    provider = providers.get(dependency_id)
-                    if provider and version_matches(provider[1].version, requirement):
-                        issues.append(
-                            f"{package.name} {package.version} {kind} {provider[1].name} "
-                            f"{provider[1].version} ({_range_text(requirement)})"
-                        )
+                continue
+            provider = providers.get(dependency_id)
+            if provider is None:
+                if complete:
+                    issues.append(
+                        f"{package.name} {package.version} requires missing package "
+                        f"{dependency_id} {_range_text(requirement)}"
+                    )
+                continue
+            if not version_matches(provider[1].version, requirement):
+                issues.append(
+                    f"{package.name} {package.version} requires {provider[1].name} "
+                    f"{_range_text(requirement)}, but {provider[1].version} is selected"
+                )
+        for kind, declarations in (
+            ("breaks", package.breaks),
+            ("conflicts with", package.conflicts),
+        ):
+            for dependency_id, requirement in declarations.items():
+                provider = providers.get(dependency_id)
+                if provider and version_matches(provider[1].version, requirement):
+                    issues.append(
+                        f"{package.name} {package.version} {kind} {provider[1].name} "
+                        f"{provider[1].version} ({_range_text(requirement)})"
+                    )
     return list(dict.fromkeys(issues))
 
 

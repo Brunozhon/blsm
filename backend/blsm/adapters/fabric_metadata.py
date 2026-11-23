@@ -39,6 +39,7 @@ def inspect_fabric_jar(
                         depends=_dependency_map(item.get("depends")),
                         breaks=_dependency_map(item.get("breaks")),
                         conflicts=_dependency_map(item.get("conflicts")),
+                        nested=depth > 0,
                     )
                 )
                 if depth < 2:

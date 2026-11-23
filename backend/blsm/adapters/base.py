@@ -35,6 +35,7 @@ class ModPackageMetadata:
     depends: dict[str, str | list[str]]
     breaks: dict[str, str | list[str]]
     conflicts: dict[str, str | list[str]]
+    nested: bool = False
 
 
 class ServerAdapter(ABC):
